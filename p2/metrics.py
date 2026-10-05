@@ -2,8 +2,9 @@
 
 How a query is scored:
 - The run's documents are put in order by score, highest first; equal scores go in document id
-  order (ascending, our rule; trec_eval itself orders ties by descending id). The rank column of a
-  run file is not used, as in trec_eval.
+  order (ascending, our rule; trec_eval itself orders ties by descending id). Scores are compared at
+  6 decimals, the precision of a run file, so a ranking in memory scores the same as the file it
+  is written to. The rank column of a run file is not used, as in trec_eval.
 - A document is relevant when its qrels label is above 0. R is the number of relevant documents.
 - recall@k: relevant documents in the top k, divided by R. When R is larger than k, a perfect run
   scores k / R, not 1.
@@ -23,6 +24,8 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
+from p2.runfile import order
+
 K = 10
 METRICS = ("recall@10", "mrr@10", "ndcg@10")
 
@@ -34,7 +37,7 @@ def ranked_ids(pairs: Iterable[tuple[str, float]], k: int | None = None) -> list
     if len(set(ids)) != len(ids):
         dupes = sorted({d for d in ids if ids.count(d) > 1})
         raise ValueError(f"The run lists {', '.join(dupes)} more than once for one query; keep one line per document.")
-    ordered = [d for d, _ in sorted(pairs, key=lambda p: (-p[1], p[0]))]
+    ordered = [d for d, _ in order(pairs)]
     return ordered if k is None else ordered[:k]
 
 

@@ -81,6 +81,9 @@ def wilson(k: int, n: int, level: float = 0.95) -> list[float]:
     return [max(0.0, centre - half), min(1.0, centre + half)]
 
 
+IDENTICAL = "identical on every query"
+
+
 def reading(ci95: Sequence[float], a: str, b: str) -> str:
     """How to read a paired interval of a - b."""
     lo, hi = ci95

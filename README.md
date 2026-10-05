@@ -63,6 +63,7 @@ You may add more systems, for an ablation or because you are curious.
 ### What a program checks and what I read
 
 `uv run p2 check` is the check that runs on your laptop and in GitHub's CI on every push.
+It runs every system that does not call Claude again and compares the result with the run files you committed, checks the runs of the systems that do call Claude against the traces you committed with them, recomputes the scores and the tables in `EVAL.md`, and checks the format of everything else.
 At the end I run the instructor's copy of `p2 check --final` on your repo, so editing the checker in your copy cannot help you.
 I score your test run files against the answer key I keep private, and I re-run your retrievers on a few documents I add that you have never seen, to confirm that the run files you committed really come from your code.
 The test score goes back to you as feedback.
@@ -82,7 +83,8 @@ Say "In work/p2-rag, run ..." to Claude Code, or run it yourself in a terminal i
 3. Clone it into `work/`, your own space in the course repo: say **"clone my P2 repo into work/p2-rag"** to Claude Code, or in a terminal at the root of the course repo run `gh repo clone <your-github-username>/p2-rag-system work/p2-rag`.
    Git ignores `work/`, so this repo never collides with a course update.
    Keep working in the same Claude Code session and say where the work goes (`work/p2-rag`).
-   Start by asking Claude Code to read `work/p2-rag/CLAUDE.md`: it is a short orientation for the agent, and it is not loaded until the agent reads a file in that folder.
+   At the start of every Claude Code session you use for P2, the first one and every one after, ask it to read `work/p2-rag/CLAUDE.md`.
+   It is a short orientation for the agent, including the rule to tell you how many Claude calls a command makes before it runs it, and Claude Code loads it only after it reads a file in that folder, so running commands there is not enough.
 4. **Install `uv`** if the prep for lecture 12 did not already.
    Check with `uv --version`; if it prints a version number, you are done.
    Otherwise, on macOS or Linux run `curl -LsSf https://astral.sh/uv/install.sh | sh`, and on Windows, in PowerShell, run `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`, then open a new terminal (on Windows, Git Bash) so it is on your PATH.
@@ -96,6 +98,7 @@ Say "In work/p2-rag, run ..." to Claude Code, or run it yourself in a terminal i
 7. Open `p2.toml` and check that `section` matches your course, `"498E"` or `"598E"`.
 8. Run `uv run p2 check`.
    On a fresh copy it prints `PASS` lines and `TODO` lines and exits cleanly: a `TODO` line is work you have not done yet and is not an error, and only a `FAIL` line means something is broken.
+   Later you may also see `NOTE` lines, which point at something in your gold set worth a second look and never fail the check.
 9. Commit and push, open the **Actions** tab of your repo, and wait for the `p2-check` run to go green.
    This first run takes a minute or two, because there is nothing to regenerate yet.
    Once you commit runs of `dense` or `hybrid`, the next run downloads the embedding model and encodes the corpus, which can take several minutes, and later runs reuse a cache.
@@ -145,13 +148,14 @@ That one rule explains most of the surprises you will find when you read a faile
 2. **Run the baseline.**
    Say "In work/p2-rag, run `uv run p2 run --corpus shared --queries practice --system bm25`".
    It writes `runs/shared/bm25.practice.trec`; open it and look at the first lines.
+   A query that shares words with fewer than ten sections, such as p01, ends with sections that score 0.000000 in document id order: that is padding up to ten lines, not a match.
 3. **Build `dense`.**
    Ask Claude Code to read `class/12-embeddings-and-retrieval/lab/starter/retrieve.py` in the course repo and port the embedding arm into `p2/retrievers/dense.py`, using the helpers in `p2/embed.py`.
    The docstring of `p2/retrievers/__init__.py` explains the interface, including the `ChunkScorer` helper that gives you both document search and the chunk search that `p2 answer` needs, and `bm25.py` is the worked example.
    You choose the embedder, and the choice goes in `EVAL.md`.
    If you want a setting of your own, such as the model name, add a table to `p2.toml` (for example `[dense]` with `model = "..."`) and read it in your retriever with `cfg.table("dense")`.
    Run it the same way as the baseline with `--system dense`.
-   Scale is the new problem: the lab had 260 articles and this corpus has thousands of sections, so the first run takes a few minutes while the vectors are computed, and then they are cached in `.cache/vectors/`.
+   Scale is the new problem: the lab had 260 articles and this corpus has thousands of sections, so the first run takes a few minutes while the vectors are computed, with a progress line every 15 seconds or so, and then they are cached in `.cache/vectors/`.
    Chunk settings live in `p2.toml`; a section is usually shorter than one chunk, but a few are long.
    A run is always at the document level: the best chunk's score becomes the document's score.
 4. **Build `hybrid`.**
@@ -159,17 +163,22 @@ That one rule explains most of the surprises you will find when you read a faile
    You decide which two systems to fuse; `bm25` and `dense` is the usual choice, and `dense` with a second embedder is also fair.
 5. **Build `rerank`.**
    Port the listwise reranker from lab 13 into `p2/retrievers/rerank.py`: a first-stage top 20, sent to Claude through `p2.claude.call`, which handles the full path, the JSON schema, the model, the saved replies, and the environment for you.
-   Keep `NEEDS_CLAUDE = True` in that file, because `p2 check` regenerates every run that does not need Claude and compares it with what you committed, and it must not spend your plan doing so.
+   Keep `NEEDS_CLAUDE = True` in that file, because `p2 check` runs every system again with Claude switched off, and it must not spend your plan doing so.
+   It checks a reranker's runs against the trace that `p2 run` writes next to them in `traces/` instead, so commit the trace with the run file.
    Try it on two queries before the full run, because every call draws on your own plan (see the cost note below).
    To do that, copy two lines of `eval/shared/practice.queries.tsv` into `.cache/two.tsv` and run `uv run p2 run --corpus shared --queries .cache/two.tsv --system rerank`, which writes its run file to `.cache/extra/` and leaves `runs/` alone.
+   Before any command that makes more than 5 Claude calls, `p2` stops and says how many: in a terminal it asks you, and when Claude Code runs it, it stops until the command is run again with `--yes`, so the agent has to bring the number to you first.
    Until a retriever is written it raises `NotImplementedError`, and `p2 run --all` skips it and lists it as work to do.
 6. **Run everything.**
    Say "In work/p2-rag, run `uv run p2 run --all --with-claude`".
-   It runs every system on the practice and test queries; without `--with-claude` it skips the reranker.
+   It runs the four systems on the practice and test queries, 60 reranker calls in all, so it asks first; without `--with-claude` it skips the reranker.
    Commit the run files in `runs/shared/`.
 7. **Score.**
    Say "In work/p2-rag, run `uv run p2 score`".
    It computes recall@10, MRR@10 and nDCG@10 for every run that has an answer key, per query class, plus the paired intervals and the minimum detectable difference for every pair of systems.
+   Recall@10 is the share of a query's relevant documents that are in its top 10, and MRR@10 is 1 divided by the rank of the first relevant one (0 if none is in the top 10), both from lab 12.
+   nDCG@10 adds up the relevant documents in the top 10, each divided by log2 of its rank plus 1 so a lower rank counts less, and divides that by the same sum for the best possible order, so 1.0 is a perfect ranking.
+   A paired interval is the 95% range of the mean difference between two systems on the same queries, found by resampling the queries 10,000 times; lecture 14 covers both in depth.
    It writes `results/results.json` and fills the tables in `EVAL.md`.
    You then write what the intervals let you claim, in `EVAL.md` section 1.
 8. **Answer the 12 questions.**
@@ -177,9 +186,10 @@ That one rule explains most of the surprises you will find when you read a faile
    `prompts/answer.txt` is the starting prompt from lab 13, and you may edit it.
    Try two questions first, one the corpus answers and one it does not (the ids are in `eval/shared/questions.tsv`): `uv run p2 answer --corpus shared --system rerank --label rerank --only a01,a09`.
    Then run all twelve with the same command without `--only`, which writes `answers/shared/rerank.json`.
-   Answering with `rerank` reranks each question before it answers, so it makes two Claude calls per question, 24 for all twelve; answering with `hybrid` makes one.
+   Answering with `rerank` reranks each question before it answers, so it makes two Claude calls per question, 24 for all twelve; answering with `hybrid` makes one, and `p2` counts the replies it already has from your trial.
 9. **Verify the answers.**
    Say "In work/p2-rag, run `uv run p2 verify answers/shared/rerank.json`".
+   It prints a PASS or FAIL line per question and always finishes cleanly, because a FAIL here is a result to report, not a broken file.
    It checks that every citation is one of the chunks that was retrieved, that every quote appears in the chunk it cites (after lower-casing and collapsing whitespace), that the 4 unanswerable questions were declined with no claims, and that the 8 answerable ones were not.
    The check proves a quote is real.
    It cannot prove that the quote supports the claim next to it, so read three answers yourself and say so in `EVAL.md`.
@@ -190,7 +200,8 @@ That one rule explains most of the surprises you will find when you read a faile
 
 Anything that runs `claude -p` draws on your own Claude plan.
 On this corpus, the course's own versions read about 12,000 input tokens per rerank call and about 7,000 per answer call, a little more than in the 13 lab because the sections are longer than the lab's articles; plan on that much.
-A full pass of the reranker over the 20 practice queries, the 40 test queries and your own 30 or more is about 90 calls, roughly a million input tokens, and the 12 answers add about 80,000.
+A full pass of the reranker over the 20 practice queries, the 40 test queries and your own 30 or more is about 90 calls, roughly a million input tokens.
+The 12 answers add about 80,000 input tokens when you answer with `hybrid`, and about 230,000 with `rerank`, which reranks each question before it answers.
 That is about three times the 13 lab.
 Spread it over several days and try a few queries before every full run.
 `p2` saves every Claude reply in `.cache/`, so running the same thing again costs nothing, but a change to your prompt, your candidates or the model asks Claude again, and so do `--fresh` and `--repeat`.
@@ -202,7 +213,7 @@ If you reach your usage limit, `/usage` shows where you stand and it resets on i
 
 ### Choose a corpus you may publish
 
-Your corpus goes in a public repo, and CI re-runs retrieval and the quote check on it.
+Your corpus goes in a public repo, and CI re-runs retrieval on it.
 So it has to be text you may republish, and I do not allow private corpora in this project, not even the pattern of keeping PDFs on your laptop and committing only a manifest.
 I know that costs some of you the corpus you would most like to use, because many fields keep their documents behind publisher licenses.
 The reason is that CI and I cannot check retrieval on documents we cannot see.
@@ -236,24 +247,27 @@ If you have no corpus of your own, choose from this short list:
 - **OSHA's rules, 29 CFR parts 1910 and 1926**, public domain, from the eCFR.
   Take a slice, such as one part or a few subparts, because the two parts together are about 1.2 million words, over the size guidance below.
   This text is the same kind as the shared corpus, so your cross-corpus comparison will be less interesting than for a different kind of text.
-- **The USGS Mineral Commodity Summaries**, public domain as federal works, with one catch: each volume says permission must be secured from the individual copyright owners for any copyrighted material inside it.
-  The license tool will flag those documents, and you resolve each flag with a written reason.
+- **The USGS Mineral Commodity Summaries**, public domain as federal works, with one catch: the front matter of each volume says permission must be secured from the individual copyright owners for any copyrighted material inside it, such as a photo credited to a company.
+  The license tool flags that sentence only where it appears, in the volume's first pages, and the per-commodity chapter PDFs, the easy way to reach 200 documents, do not repeat it.
+  So a corpus of chapters can come back clean, and you still say in `EVAL.md` that the volume makes this reservation and why your chapters are text you may publish.
+  Ingest each year's chapters with its own `--source`, for example `--source "https://pubs.usgs.gov/periodicals/mcs2024/{name}"`, so every document records the address of its own file.
 
 The eCFR's website blocks scripts but its API does not, so ask Claude Code to write a small fetch script (I fetched 30 CFR that way).
-Keep your raw downloads outside the repo, for example in `work/p2-raw/`.
+Keep your raw downloads outside the repo, for example in `work/p2-raw/`, which from inside `work/p2-rag`, where every command runs, is `../p2-raw`.
 
 Size rules, checked by `p2 check`:
 
 - At least **200 documents** from one domain.
   Below that, every system finds nearly everything and the comparison measures nothing.
   Long documents split into parts of about 10 pages, and each part counts as a document.
-- At most **25 MB** under `corpora/own/` and 10 MB per file, and a warning above about 500,000 tokens (words times 1.4), because CI encodes the whole corpus cold.
-- Between 500 and 1,500 documents is a good size; past about 1,500 you add CI time and not information.
+- At most **25 MB** under `corpora/own/` and 10 MB per file, and at most about **500,000 tokens** (words times 1.4), because CI encodes the whole corpus cold and has 30 minutes to do it: `p2 check` warns above 500,000 and fails above 600,000.
+- Between 500 and 1,500 documents is a good size, as long as the corpus stays under the token limit, which for long documents means fewer of them; past about 1,500 you add CI time and not information.
 
 ### Steps
 
 1. **Ingest it.**
-   Install the converters with `uv sync --group ingest`, which CI never does, and run `uv run p2 ingest <your-raw-folder> --into own --license <id> --source "<where it came from>"`, where `<id>` is one of the license values listed in step 3.
+   Install the converters with `uv sync --group ingest`, which CI never does, and run `uv run p2 ingest ../p2-raw --into own --license <id> --source "<where it came from>"`, where `<id>` is one of the license values listed in step 3.
+   In `--source`, `{name}` stands for each file's name, so `--source "https://example.org/reports/{name}"` gives every document the address of its own file.
    PDFs go through pypdf, web pages through trafilatura, and `.md` and `.txt` files are read as they are.
    Word and PowerPoint files are refused, and the message tells you to export them to PDF first.
    Ingest runs a cleaning pass that strips markup, repairs ligatures and soft hyphens, re-joins words hyphenated across lines, drops page headers and footers, and drops a trailing reference list.
@@ -261,17 +275,20 @@ Size rules, checked by `p2 check`:
    Documents over about 15,000 words are split into parts with the page range in the id, and exact duplicates are skipped.
    If your documents have different licenses, run ingest once per license so each batch gets its own `--license` and `--source`, or edit the manifest rows by hand.
    Document ids come from file names and never change once your judgments mention them.
+   Titles come from the PDF's metadata, the first heading or the first line; when several PDFs share one metadata title, as every chapter of a volume often does, each title starts with its file name instead.
 2. **Read `corpora/own/INGEST.md`.**
    It has one line per document with its word count, characters per page and any flags.
    A document with fewer than about 400 characters per page is probably a scanned image with no text; drop it, or ask Claude Code about the OCR option in the ingest docs.
    Open three documents and read them, because a corpus you have not looked at will surprise you later.
+   If you remove documents by hand later, `uv run p2 ingest --report` rewrites `INGEST.md` for the documents that are left.
 3. **Check the licenses.**
    Run `uv run p2 license`.
    It writes `LICENSES.md` and fails when a document's `license` in the manifest is not on the allowed list: `us-gov-public-domain`, `public-domain`, `cc0-1.0`, `cc-by-2.0` to `cc-by-4.0`, `cc-by-sa-2.0` to `cc-by-sa-4.0`, `own-work`, `mit`, `apache-2.0`, `bsd-2-clause` and `bsd-3-clause`.
    Anything else fails, including `unknown`, an empty value, and anything NC or ND.
-   It also scans each document's text for a copyright line, "All rights reserved", a publisher's name, a CC BY-NC notice, "reprinted with permission", and the USGS permission sentence.
+   It also scans each document's text for a copyright line, "All rights reserved", a publisher's name next to words about rights (such as "Published by Elsevier"), a CC BY-NC notice, "reprinted with permission", the USGS permission sentence, a contractor's notice and a "courtesy of" credit line.
    Each hit is a flag, and a flag passes only when the manifest's `notes` column says `reviewed: <reason>` for that document.
-   Say "run the license-check skill in work/p2-rag" and Claude Code walks you through each failing or flagged document: it opens the source page, finds and quotes the license text, and you decide whether to record `reviewed: <reason with the quote>` or remove the document.
+   A publisher's name on its own, such as "see ASTM E2500", is usually a citation, so `LICENSES.md` lists it as a mention and it needs no review.
+   Ask Claude Code to "read `work/p2-rag/.claude/skills/license-check/SKILL.md` and walk me through my license failures", and it takes you through each failing or flagged document: it opens the source page, finds and quotes the license text, and you decide whether to record `reviewed: <reason with the quote>` or remove the document.
    Run `uv run p2 license --online` on your own machine as well; for a source with a DOI, an arXiv id or a PubMed Central id, it asks Crossref, arXiv or PubMed Central for the published license and reports any mismatch with yours.
    The tool gathers evidence and flags problems.
    It cannot prove a license, and you remain responsible for what you commit, so when you cannot quote the license for a document, take the document out.
@@ -289,7 +306,7 @@ Size rules, checked by `p2 check`:
      A gold set built only from what one system returned is biased toward that system.
    - Claude Code can search the corpus for candidates, and it can draft queries, but you decide what is relevant.
 5. **Run the four systems.**
-   Say "In work/p2-rag, run `uv run p2 run --all --with-claude`", which writes `runs/own/<system>.trec` for each system.
+   Say "In work/p2-rag, run `uv run p2 run --all --with-claude`", which writes `runs/own/<system>.trec` for each system and asks before the reranker's calls.
 6. **Score.**
    Run `uv run p2 score` again, and the own-corpus tables in `EVAL.md` fill in.
 7. **Run one ablation.**
@@ -299,6 +316,7 @@ Size rules, checked by `p2 check`:
    Make the variant its own system by adding a file to `p2/retrievers/`, for example `bm25_lab.py` or `dense_potion.py`; a file there is a system, and nothing else needs registering.
    A variant that only changes a setting can build with a changed copy of the settings, `cfg.replace(chunk_words=100)`, so you do not have to edit `p2.toml`, which every system shares.
    Run it with `--ablation`, as in `uv run p2 run --corpus own --system bm25_lab --ablation`, which writes the run file to `runs/own/ablation/`.
+   From then on `p2 run --all` runs it again only as that ablation, not on every query set.
    Then run `uv run p2 score` and write what the interval lets you claim; the `own-ablation` table in `EVAL.md` compares it with your other systems.
 8. **Write the analysis** (next section), then `uv run p2 check --final`.
 
@@ -330,6 +348,7 @@ It says the gold set was too small to tell.
 
 `p2 score` also gives the minimum detectable difference, the smallest gap this many queries could reliably show.
 If the typical per-query spread is about 0.3, then 30 queries can only detect a difference of about 0.15 in MRR, and a gap of 0.05 is invisible however real it is.
+On the shared practice queries the spread between two systems is 0.3 at the smallest and over 0.6 at the largest, so most pairs need more queries than that.
 So write the interval, say "not distinguishable" when it includes zero, never rank two systems by their averages alone, and say how large a difference you could have seen.
 A claim that matches its interval is a good result even when the answer is "I cannot tell".
 
@@ -356,6 +375,8 @@ You commit it before the first judgment appears in `eval/own/qrels.txt`, and `p2
 Afterwards you report the outcome against it.
 A well-powered null scores as well as a confirmation, so you have no reason to hedge the claim.
 For example, a 0.10 MRR gap at a per-query standard deviation of 0.3 needs about 71 queries, against the 30 that detect only about 0.15.
+The spreads you will measure in stage 1 are mostly larger than 0.3: on the practice queries they run from about 0.31 (`hybrid` against `bm25`) to about 0.66 (`dense` against `bm25`), and `rerank` against `hybrid` is about 0.39, where a 0.10 gap needs about 120 queries, 0.15 about 55 and 0.20 about 31.
+So choose the smallest effect that matters together with a gold set you can judge in the time you have, and say in `PREREG.md` how you traded the two off.
 
 ---
 
@@ -433,8 +454,9 @@ If Canvas and this file ever disagree, Canvas wins, and please tell me so I can 
   You never need an API key in this project, because `claude -p` uses your Claude Code sign-in.
 - **Commit only text you may publish**, with its license recorded.
 - **The numbers must come from your code.**
-  Run files, answers files, `results/results.json` and the tables in `EVAL.md` are written by commands, and `p2 check` runs your systems again, recomputes the scores, and checks the citations, so it notices a hand edit.
-  Do not edit them by hand and do not hard-code answers.
+  Run files, their traces, answers files, `results/results.json` and the tables in `EVAL.md` are written by commands.
+  `p2 check` runs your systems again, checks the reranker's runs against their traces, and recomputes the scores and tables, and I also run your retrievers on documents you have not seen and score your test runs.
+  Do not edit those files by hand, and do not hard-code answers.
 - **Write the judgment parts yourself:** your `hand` queries, your relevance labels, `DECISIONS.md`, the prose in `EVAL.md`, and `PREREG.md`.
   The agent can find candidates and explain numbers.
 - **Tune on the practice queries, never on the test queries.**
@@ -450,7 +472,7 @@ If Canvas and this file ever disagree, Canvas wins, and please tell me so I can 
 
 - **CI is red.**
   Run `uv run p2 check` on your own machine, and read the `FAIL` lines; each one says what to do next.
-  The usual causes are a committed run that no longer reproduces because you changed your code or `p2.toml` after generating it (run it again and commit the new file), a `results/results.json` or `EVAL.md` table that is out of date (run `uv run p2 score`), a carriage return in a file under `corpora/` (set your editor to LF line endings), and a failing license or a corpus over the size caps.
+  The usual causes are a committed run that no longer reproduces because you changed your code or `p2.toml` after generating it (run it again and commit the new file), a reranker run committed without its trace in `traces/`, a `results/results.json` or `EVAL.md` table that is out of date (run `uv run p2 score`), a carriage return in a file under `corpora/` (set your editor to LF line endings), and a failing license or a corpus over the size limits.
   A `TODO` line is not a failure.
 - **A model download fails or hangs.**
   Check your internet connection and run the warm-up again; files that finished downloading are kept.
@@ -460,12 +482,15 @@ If Canvas and this file ever disagree, Canvas wins, and please tell me so I can 
   Open `claude` once in a terminal and sign in, then run the command again.
   `p2/claude.py` removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the child process, and prints a line when it does, so a key left over from another course is never billed for your runs.
   If `claude` is not found, check that `claude --version` works in the same terminal.
+  On Windows, `p2` refuses a `claude.cmd` from an npm install, because Windows cannot pass a multi-line prompt through it safely; install Claude Code with the official installer from `setup.md` instead.
 - **You hit your usage limit.**
   Wait for the reset, do the parts that do not need Claude in the meantime (the corpus, the gold set, the analysis), and spread the Claude steps over more days.
 - **Windows or an Intel Mac.**
   The template is written to run on both, and its own tests run on Windows and macOS, but those two are the setups I have tested least.
   On Windows, use Git Bash for every command.
   `uv sync` picks a Python below 3.14 on purpose, because that range keeps Intel Macs working, so leave `.python-version` and the `requires-python` line in `pyproject.toml` alone.
+  An Intel Mac needs macOS 13 or newer, because that is the oldest system the embedding library ships for.
+  A Windows laptop with an ARM processor (a Snapdragon, say) has no packages of its own for the embedding library, so run `uv sync --python cpython-3.12-windows-x86_64-none` once, which uses the Intel version of Python under Windows' emulation; tell me if it fails.
   If something fails, send me the exact output.
 - **The stubs raise `NotImplementedError`.**
   That is expected until you write the retriever; the message names the lab file that shows the idea.

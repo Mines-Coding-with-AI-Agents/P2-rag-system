@@ -37,6 +37,24 @@ Prose that the student writes. TODO: write it.
 <!-- p2:begin answers -->
 <!-- p2:end answers -->
 
+<!-- p2:begin shared-practice-classes -->
+<!-- p2:end shared-practice-classes -->
+
+<!-- p2:begin own -->
+<!-- p2:end own -->
+
+<!-- p2:begin own-classes -->
+<!-- p2:end own-classes -->
+
+<!-- p2:begin own-origins -->
+<!-- p2:end own-origins -->
+
+<!-- p2:begin own-pairs -->
+<!-- p2:end own-pairs -->
+
+<!-- p2:begin own-ablation -->
+<!-- p2:end own-ablation -->
+
 <!-- p2:begin someone-elses-block -->
 left alone
 <!-- p2:end someone-elses-block -->

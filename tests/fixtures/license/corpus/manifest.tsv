@@ -67,3 +67,6 @@ missing-file	Missing file	https://example.org/m	cc-by-4.0
 vocab-mit	Duplicate row	https://example.org/d	mit	
 Bad_ID	Bad id	https://example.org/b	mit	
 too-many-columns	Title	src	mit	notes	extra
+scan-contractor-notice	Pump note	https://example.org/x	cc-by-4.0	
+scan-credit-line	Pump note	https://example.org/x	cc-by-4.0	
+clean-publisher-mentions	Pump note	https://example.org/x	cc-by-4.0	

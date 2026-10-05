@@ -35,6 +35,8 @@ Removing a document is always fine, and it costs little, because the count of 20
 **1. Show the evidence.**
 Give the docid, title, source, the `license` in the manifest, and the reason from the report: a license problem, the matching lines from the text scan, or an online mismatch.
 Read the matching lines in `corpora/own/docs/<docid>.md` so you know what they say in context.
+A hit on "a line ingest removed" is in the manifest's `notes` (`cleaning removed: ...`): ingest saw it in the raw file, for example a publisher footer on every page, and its cleaning pass dropped it, so open the original file or the source page to read it.
+A "mentions" entry in `LICENSES.md` (a publisher's name with no words about rights on its line, such as "see ASTM E2500") is not a flag and needs nothing from the student.
 
 **2. Open the source.**
 The `source` column is a URL or a citation.
@@ -67,8 +69,9 @@ These are the usual cases:
 - **A flag that is a false alarm.**
   A publisher's name inside a citation, or "ISO" as a standard that the text mentions, does not make the document the publisher's.
   The reason should still point at the document's own rights statement, for example the agency page that says its employees' works are not under copyright.
-- **A government report with third-party material.**
+- **A government report with third-party material, a contractor's notice or a "courtesy of" credit.**
   The US government's text is public domain, but photos, figures and quoted passages inside it may not be, and some reports are written by contractors.
+  A contractor's notice ("prepared as an account of work sponsored by an agency of the United States Government", "under Contract No. DE-...") means the report is the contractor's work, which the brief does not allow, so the usual decision is to remove it unless the report itself states an open license.
   Check whether the flagged line is about material that is in the corpus text, or only about an image that ingest did not keep.
   If it is a figure or a photo that is not in the committed text, the reason can say that, with the report's own sentence about third-party material as the quote.
   If a long quoted passage from a copyrighted source is in the text, the student should cut that part or remove the document.
@@ -91,7 +94,7 @@ reviewed: <what you found>; the page says "<exact quote>" (<URL>)
 ```
 
 For example: `reviewed: author line only, the article itself is open access; the page says "This is an open access article distributed under the terms of the Creative Commons Attribution License" (https://pmc.ncbi.nlm.nih.gov/articles/PMC1182327/)`.
-To remove a document, delete its row from the manifest and its file from `corpora/own/docs/`, and tell the student you did it.
+To remove a document, delete its row from the manifest and its file from `corpora/own/docs/`, run `uv run p2 ingest --report` so `corpora/own/INGEST.md` lists only the documents that are left, and tell the student you did it.
 If `eval/own/qrels.txt` already mentions that docid, tell the student to take those judgments out too, because a judgment for a document that no longer exists fails `p2 check`.
 Never reuse a removed docid for a different document.
 

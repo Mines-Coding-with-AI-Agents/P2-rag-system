@@ -1,4 +1,4 @@
 # Pump note
 
 Pump notes.
-IEEE Transactions on Pump Theory.
+Authorized licensed use limited to: a university. Downloaded from IEEE Xplore. Restrictions apply.

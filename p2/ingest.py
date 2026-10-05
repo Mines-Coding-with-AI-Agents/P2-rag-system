@@ -1,7 +1,9 @@
 """p2 ingest: turn a folder of your own documents into a clean corpus.
 
     uv sync --group ingest
-    uv run p2 ingest raw/ --license cc-by-4.0 --source "arXiv, CC BY papers"
+    uv run p2 ingest ../p2-raw --license cc-by-4.0 --source "arXiv, CC BY papers"
+    uv run p2 ingest ../p2-raw/2024 --license us-gov-public-domain --source "https://pubs.usgs.gov/periodicals/mcs2024/{name}"
+    uv run p2 ingest --report      rewrite INGEST.md after you removed documents by hand
 
 What it does, in order:
 
@@ -16,11 +18,14 @@ What it does, in order:
    and drops a trailing reference list.
 3. Splits a document of more than about 15,000 words into parts of about 10 pages and puts the page range in the id,
    for example `nasa-handbook__p041-050`, because a 300-page handbook is relevant to every query and so says nothing about any one of them.
-4. Gives each document an id built from its file name, for example `Taylor 1994 - TN1297.pdf` becomes `taylor-1994-tn1297`.
+4. Gives each document an id built from its file name, for example `Taylor 1994 - TN1297.pdf` becomes `taylor-1994-tn1297`,
+   and a title from the PDF's metadata, the first heading or the first line; when several PDFs of one run share a
+   metadata title (every chapter of a volume, say), each title starts with its file name.
    Ids use only lower-case letters, digits, dots, underscores and hyphens, and an id never changes once your qrels mention it.
 5. Skips a document whose normalized text is identical to one already in the corpus, so running ingest twice on the same folder adds nothing the second time.
 6. Writes `corpora/<into>/docs/<docid>.md`, appends one row per document to `corpora/<into>/manifest.tsv`
-   (license from --license, or `unknown` until you fix it; source from --source, or the file name),
+   (license from --license, or `unknown` until you fix it; source from --source, where {name} and {stem}
+   stand for each file's name, or the file name),
    and writes `corpora/<into>/INGEST.md` with one line per document: words, characters per page and flags.
 
 A document under about 400 characters per page is probably a scan with no text layer, and is flagged.
@@ -41,6 +46,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -60,6 +66,7 @@ RUNNING_LINE_SHARE = 0.3  # a line at the edge of at least 30 percent of the pag
 RUNNING_LINE_EDGE = 3  # the first and last three non-empty lines of a page count as its edge
 TOKENS_PER_WORD = 1.4
 TOKEN_WARNING = 500_000
+TOKEN_LIMIT = 600_000  # p2 check fails above this
 
 OFFICE_EXTENSIONS = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".pages", ".key"}
 SHEET_EXTENSIONS = {".xls", ".xlsx", ".csv", ".tsv", ".ods", ".numbers"}
@@ -387,13 +394,35 @@ def _first_line_title(text: str, limit: int = 160) -> str:
     return ""
 
 
+_FILE_EXT = r"\.(?:docx?|pdf|tex|indd|pptx?|dvi|qxd)\b"
+
+
 def _usable_pdf_title(raw) -> str:
+    """The PDF's Title metadata when it reads like a title; a file name glued to it is cut off
+    ("mcs2025.pdf - Mineral Commodity Summaries 2025" keeps the second half)."""
     title = " ".join(str(raw or "").split())
+    title = re.sub(rf"^\S+{_FILE_EXT}\s*[-:|]\s*", "", title, flags=re.I)
+    title = re.sub(rf"\s*[-:|]\s*\S+{_FILE_EXT}$", "", title, flags=re.I)
     if len(title) < 8 or title.lower() in {"untitled", "untitled document", "title"}:
         return ""
-    if re.search(r"\.(docx?|pdf|tex|indd|pptx?|dvi|qxd)$", title, re.I) or title.lower().startswith("microsoft word"):
+    if re.search(rf"\S{_FILE_EXT}", title, re.I) or title.lower().startswith("microsoft word"):
         return ""
     return title[:200]
+
+
+def pdf_metadata_title(path: Path) -> str:
+    """The usable Title metadata of a PDF, read without reading its pages ("" when there is none)."""
+    try:
+        from pypdf import PdfReader
+
+        return _usable_pdf_title((PdfReader(str(path)).metadata or {}).get("/Title"))
+    except Exception:  # noqa: BLE001 - a PDF that cannot be opened is reported when it is read
+        return ""
+
+
+def name_title(path: Path) -> str:
+    """A file name as words: "mcs2024-aluminum.pdf" gives "mcs2024 aluminum"."""
+    return " ".join(re.split(r"[-_\s]+", path.stem)).strip()
 
 
 def one_line(text: str, limit: int = 200) -> str:
@@ -568,6 +597,7 @@ class FileResult:
     message: str = ""
     units: list[Unit] = field(default_factory=list)
     duplicates: list[tuple[str, str]] = field(default_factory=list)  # (docid that would have been, existing id)
+    title: str = ""  # the title every unit's title starts with
 
 
 def clean_document(extracted: Extracted, kind: str) -> tuple[list[str], dict]:
@@ -606,6 +636,22 @@ def _make_unit(docid, title, pages_text, n_pages, cleaning, notes) -> Unit:
     return Unit(docid, one_line(title) or docid, body, words, cpp, flags, cleaning, notes, normalized_hash(body))
 
 
+def removed_license_lines(raw_pages: list[str], clean_pages: list[str]) -> list[str]:
+    """License evidence that only the raw text had: a publisher footer on every page, say, which the
+    cleaning pass drops as a running line. Each comes back as `<kind> "<line>"` for the manifest notes,
+    where `p2 license` still sees it."""
+    try:
+        from p2.license import scan_text
+    except ImportError:
+        return []
+    kept = {h["kind"] for h in scan_text("\n".join(clean_pages))}
+    found: dict[str, str] = {}
+    for hit in scan_text("\n".join(clean_chars(p) for p in raw_pages)):
+        if hit["kind"] not in kept and hit["kind"] not in found:
+            found[hit["kind"]] = hit["line"][:120].replace('"', "'")
+    return [f'{kind} "{line}"' for kind, line in found.items()]
+
+
 def build_units(docid: str, rel: str, extracted: Extracted, kind: str) -> tuple[list[Unit], str]:
     """Clean one document and cut it into the units to be written. Returns (units, problem)."""
     pages, info = clean_document(extracted, kind)
@@ -614,6 +660,9 @@ def build_units(docid: str, rel: str, extracted: Extracted, kind: str) -> tuple[
     total_words = sum(len(p.split()) for p in pages)
     title = extracted.title or docid
     base_note = f"file: {rel}"
+    removed = removed_license_lines(extracted.pages, pages)
+    if removed:
+        base_note += "; cleaning removed: " + " | ".join(removed)
 
     if total_words == 0:
         if extracted.paged:
@@ -683,7 +732,7 @@ def process_file(path: Path, rel: str, docid: str) -> FileResult:
         return FileResult(rel, "error", f"{type(exc).__name__}: {one_line(exc, 160)}")
     if problem:
         return FileResult(rel, "empty", problem)
-    return FileResult(rel, "ok", units=units)
+    return FileResult(rel, "ok", units=units, title=extracted.title or docid)
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +854,9 @@ Take five minutes to open the shortest, a middle one and the longest document ne
   A paper whose list has neither can keep it, and then every author and journal name matches queries it should not.
 - Open the first lines of a few documents.
   Author lists, copyright pages and tables of contents are not removed automatically, and you may want to cut them.
+- Compare one table with the PDF.
+  A PDF prints footnote marks as small raised digits, and the converter glues them onto the word or number next to them: `ALUMINUM1` is the heading ALUMINUM with footnote 1, and `11210,000` can be 210,000 with footnote 11.
+  Quotes still match the stored text, but a number read from it can be wrong, so check before you trust a figure in a query, a judgment or an answer.
 - Fix the `license` column in the manifest for every document, then run `uv run p2 license`.
   It is `unknown` until you do, and `unknown` does not pass.
 """
@@ -816,7 +868,7 @@ def write_report(path: Path, rows: dict[str, dict], notices: list[tuple[str, str
         "",
         "Written by `uv run p2 ingest`.",
         "It lists every document in this corpus that ingest added, with what the cleaning pass did and anything that looks wrong.",
-        "Running ingest again adds to the table and replaces the \"last run\" section.",
+        'Running ingest again adds to the table and replaces the "last run" section, and `uv run p2 ingest --report` rewrites it for the documents in docs/ now, after you removed some.',
         "",
         "## Summary",
         "",
@@ -864,7 +916,8 @@ def add_arguments(parser) -> None:
     parser.add_argument("src_dir", help="folder with your documents (PDF, HTML, Markdown, text)")
     parser.add_argument("--into", default="own", help="corpus to add to, under corpora/ (default: own)")
     parser.add_argument("--license", default=None, help="license id for every document in this run, for example cc-by-4.0 (default: unknown)")
-    parser.add_argument("--source", default=None, help="where these documents came from, a URL or a citation (default: the file name)")
+    parser.add_argument("--source", default=None, help="where these documents came from, a URL or a citation (default: the file name); {name} and {stem} stand for each file's name")
+    parser.add_argument("--report", action="store_true", help="rewrite INGEST.md for the documents in docs/ now, without reading a folder")
 
 
 def _arg(args, *names, default=None):
@@ -895,18 +948,75 @@ def _walk(src: Path, skip_under: Path | None) -> list[Path]:
     return sorted(files, key=lambda p: p.relative_to(src).as_posix().lower())
 
 
+def source_for(template: str | None, path: Path, rel: str) -> str:
+    """The manifest source of one file: --source with {name}, {stem} and {path} filled in, or the file's path.
+
+    In a URL, {name} and {path} are percent-encoded, so a space in a file name becomes %20."""
+    if not template:
+        return rel
+    is_url = re.match(r"^https?://", template.strip(), re.I) is not None
+    values = {"name": path.name, "stem": path.stem, "path": rel}
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", quote(value) if is_url and key != "stem" else value)
+    return template
+
+
+def _notices_from(report: Path) -> list[tuple[str, str, str]]:
+    """The "not added in the last run" lines of an existing INGEST.md, so --report keeps them."""
+    if not report.exists():
+        return []
+    text = report.read_text(encoding="utf-8")
+    m = re.search(r"^## Not added in the last run\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    out = []
+    for line in (m.group(1) if m else "").splitlines():
+        item = re.match(r"^- `([^`]+)`: (.+)$", line)
+        if item:
+            out.append((item.group(1), "kept", item.group(2)))
+    return out
+
+
+def write_current_report(report: Path, docs_dir: Path, report_rows: dict[str, dict], notices: list[tuple[str, str, str]]) -> tuple[int, int, dict]:
+    """Write INGEST.md for the documents in docs/ now. Returns (documents, words, totals)."""
+    present = {p.stem: p for p in docs_dir.glob("*.md")}
+    rows = {k: v for k, v in report_rows.items() if k in present}
+    total_words = 0
+    for docid, path in present.items():
+        words = len(path.read_text(encoding="utf-8").split())
+        total_words += words
+        rows.setdefault(docid, {"words": words, "cpp": "-", "flags": "", "cleaning": "not added by p2 ingest"})
+    totals = {"documents": len(present), "words": total_words, "flagged": sum(1 for v in rows.values() if v["flags"])}
+    write_report(report, rows, notices, totals)
+    return len(present), total_words, totals
+
+
+def refresh_report(root: Path, into: str) -> int:
+    """`p2 ingest --report`: rewrite INGEST.md for the documents in docs/ now, without reading a folder."""
+    corpus_dir = root / "corpora" / into
+    docs_dir, report = corpus_dir / "docs", corpus_dir / "INGEST.md"
+    if not docs_dir.is_dir():
+        _say(f"corpora/{into}/docs/ does not exist yet, so there is nothing to report.")
+        return 1
+    documents, words, totals = write_current_report(report, docs_dir, _read_report_rows(report), _notices_from(report))
+    _say(f"Rewrote corpora/{into}/INGEST.md: {documents} document(s), about {words:,} words (about {int(words * TOKENS_PER_WORD):,} tokens), {totals['flagged']} flagged.")
+    return 0
+
+
 def run(args) -> int:
-    src_arg = _arg(args, "src_dir", "src", "srcdir", "folder", "path", "directory")
-    if not src_arg:
-        _say("Tell me which folder to read, for example: uv run p2 ingest raw/")
-        return 1
-    src = Path(src_arg)
-    if not src.is_dir():
-        _say(f"I could not find a folder called {src}. Check the path and try again.")
-        return 1
     into = str(_arg(args, "into", default="own"))
     if not INTO_RE.match(into):
         _say(f"{into!r} is not a corpus name. Use lower-case letters, digits, hyphens and underscores, for example: own")
+        return 1
+    if getattr(args, "report", False):
+        return refresh_report(_find_root(args), into)
+    src_arg = _arg(args, "src_dir", "src", "srcdir", "folder", "path", "directory")
+    if not src_arg:
+        _say("Tell me which folder to read, for example: uv run p2 ingest ../p2-raw")
+        return 1
+    src = Path(src_arg)
+    if not src.is_dir():
+        _say(f"I could not find a folder called {src} (I looked for {src.resolve()}).")
+        if not src.is_absolute():
+            _say(f"A path is read from the folder you run p2 in, which is your P2 repo, so a folder beside the repo is ../{src.name}.")
         return 1
 
     root = _find_root(args)
@@ -951,6 +1061,16 @@ def run(args) -> int:
     taken = {p.stem for p in docs_dir.glob("*.md")} | read_manifest_ids(manifest)
     seen_hash = existing_hashes(docs_dir)
 
+    # Many publishers put one title on every chapter of a volume (the USGS Mineral Commodity Summaries
+    # call every chapter "Mineral Commodity Summaries 2024"). A title several files share says nothing
+    # about any one of them, so those files start their title with their file name.
+    meta = {p: pdf_metadata_title(p) for p in files if p.suffix.lower() in PDF_EXTENSIONS}
+    shared_titles = {t for t, n in collections.Counter(t for t in meta.values() if t).items() if n > 1}
+    if shared_titles:
+        sharing = sum(1 for t in meta.values() if t in shared_titles)
+        shown = "; ".join(sorted(shared_titles)[:2])
+        _say(f"{sharing} PDF files share {'a title' if len(shared_titles) == 1 else 'titles'} in their metadata ({shown}), so each of their titles starts with the file name.")
+
     rows_out: list[tuple[str, str, str, str, str]] = []
     report_rows = _read_report_rows(report)
     notices: list[tuple[str, str, str]] = []
@@ -978,6 +1098,11 @@ def run(args) -> int:
                 _say(f"-> already in the corpus (same text as {same}), skipped")
                 notices.append((rel, "duplicate", f"The text is the same as `{same}`, which is already in the corpus."))
                 continue
+            if meta.get(path) and meta[path] in shared_titles and result.title == meta[path]:
+                better = f"{name_title(path)} - {result.title}"
+                for unit in fresh:
+                    if unit.title.startswith(result.title):
+                        unit.title = one_line(better + unit.title[len(result.title) :])
             for unit in fresh:
                 if unit.docid in taken:  # a part id that clashes with an existing document
                     n = 2
@@ -987,7 +1112,7 @@ def run(args) -> int:
                 taken.add(unit.docid)
                 seen_hash[unit.digest] = unit.docid
                 write_doc(docs_dir, unit)
-                rows_out.append((unit.docid, unit.title, source_text or rel, license_value, unit.notes))
+                rows_out.append((unit.docid, unit.title, source_for(source_text, path, rel), license_value, unit.notes))
                 report_rows[unit.docid] = {
                     "words": unit.words,
                     "cpp": "-" if unit.chars_per_page is None else str(unit.chars_per_page),
@@ -1014,31 +1139,23 @@ def run(args) -> int:
         append_manifest(manifest, [])
 
     # the report lists the documents that exist now
-    present = {p.stem for p in docs_dir.glob("*.md")}
-    report_rows = {k: v for k, v in report_rows.items() if k in present}
-    total_words = 0
-    for p in docs_dir.glob("*.md"):
-        total_words += len(p.read_text(encoding="utf-8").split())
-    totals = {
-        "documents": len(present),
-        "words": total_words,
-        "flagged": sum(1 for v in report_rows.values() if v["flags"]),
-    }
-    write_report(report, report_rows, notices, totals)
+    n_present, total_words, totals = write_current_report(report, docs_dir, report_rows, notices)
 
     est_tokens = int(total_words * TOKENS_PER_WORD)
     shown_report = report.relative_to(root).as_posix() if report.is_relative_to(root) else str(report)
     shown_manifest = manifest.relative_to(root).as_posix() if manifest.is_relative_to(root) else str(manifest)
     _say()
-    _say(f"Added {added} document(s). The corpus now has {len(present)} document(s), about {total_words:,} words (about {est_tokens:,} tokens).")
+    _say(f"Added {added} document(s). The corpus now has {n_present} document(s), about {total_words:,} words (about {est_tokens:,} tokens).")
     if notices:
         _say(f"{len(notices)} file(s) were not added; the reasons are in {shown_report}.")
     if totals["flagged"]:
         _say(f"{totals['flagged']} document(s) have flags. Open {shown_report} and look at them before you trust the text.")
-    if len(present) < 200:
-        _say(f"You need at least 200 documents in the own corpus for the final check, so {200 - len(present)} more to go (long documents split into parts count as parts).")
-    if est_tokens > TOKEN_WARNING:
-        _say(f"Heads up: that is above about {TOKEN_WARNING:,} tokens, and a cold run on the CI machine will be slow. Consider a smaller corpus.")
+    if n_present < 200:
+        _say(f"You need at least 200 documents in the own corpus for the final check, so {200 - n_present} more to go (long documents split into parts count as parts).")
+    if est_tokens > TOKEN_LIMIT:
+        _say(f"That is above the limit of {TOKEN_LIMIT:,} tokens, so `p2 check` will fail: CI could not encode the corpus in time. Remove documents, or keep only the parts your queries need.")
+    elif est_tokens > TOKEN_WARNING:
+        _say(f"Heads up: that is above about {TOKEN_WARNING:,} tokens, near the limit of {TOKEN_LIMIT:,}, and a cold run on the CI machine will be slow.")
     if added and license_value == "unknown":
         _say(f"The license column says unknown for these documents. Fix it in {shown_manifest}, then run: uv run p2 license")
     _say(f"Wrote {shown_report}")

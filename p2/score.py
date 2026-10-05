@@ -13,6 +13,7 @@ The names:
     shared-practice-pairs      every pair of systems: mean difference, paired 95% interval, minimum
                                detectable difference, reading (add -recall, -mrr or -ndcg for one metric)
     own, own-classes, own-pairs   the same on your own corpus and gold set
+    own-origins                the own-corpus scores for the queries you wrote (hand) and the ones a model drafted (claude)
     own-ablation               each ablation run against each of the other systems on your corpus
     answers                    each answers file: verified share, not_found share, declined share
     repeats                    598E: the repeated reranker runs and answers files, with their spread
@@ -35,7 +36,11 @@ from p2.runfile import read_qrels, read_queries, read_run
 METRIC_NAMES = {"recall@10": "Recall@10", "mrr@10": "MRR@10", "ndcg@10": "nDCG@10"}
 METRIC_SLUGS = {"recall": "recall@10", "mrr": "mrr@10", "ndcg": "ndcg@10"}
 SETS = {"shared-practice": ("shared", "practice"), "shared-test": ("shared", "test"), "own": ("own", "own")}
-VIEWS = ("classes", "pairs", "ablation")
+VIEWS = ("classes", "origins", "pairs", "ablation")
+OWN_ONLY_VIEWS = ("origins", "ablation")
+# The tables EVAL.md must keep (a name with a metric added, such as shared-practice-pairs-mrr, counts).
+REQUIRED_BLOCKS = ("shared-practice", "shared-practice-classes", "shared-practice-pairs", "answers", "own", "own-classes", "own-origins", "own-pairs", "own-ablation")
+RIDER_BLOCKS = ("repeats",)
 BLOCK_RE = re.compile(r"<!-- p2:begin (?P<name>[A-Za-z0-9_.-]+) -->(?P<body>.*?)<!-- p2:end (?P=name) -->", re.S)
 BEGIN_RE = re.compile(r"<!-- p2:begin ([A-Za-z0-9_.-]+) -->")
 END_RE = re.compile(r"<!-- p2:end ([A-Za-z0-9_.-]+) -->")
@@ -109,11 +114,12 @@ def _pairs(names: list[str], per_query: dict[str, dict[str, dict[str, float]]], 
                 va = [per_query[a][q][m] for q in judged]
                 vb = [per_query[b][q][m] for q in judged]
                 boot = stats.paired_bootstrap(va, vb)
+                same = all(x == y for x, y in zip(va, vb))
                 out.append({
                     "a": a, "b": b, "metric": m, "n": boot["n"],
                     "mean_diff": r6(boot["mean_diff"]), "ci95": [r6(v) for v in boot["ci95"]],
-                    "sd_diff": r6(boot["sd_diff"]), "mdd80": r6(stats.mdd(boot["sd_diff"], boot["n"])),
-                    "reading": stats.reading(boot["ci95"], a, b),
+                    "sd_diff": r6(boot["sd_diff"]), "mdd80": None if same else r6(stats.mdd(boot["sd_diff"], boot["n"])),
+                    "reading": stats.IDENTICAL if same else stats.reading(boot["ci95"], a, b),
                 })  # fmt: skip
     return out
 
@@ -132,6 +138,8 @@ def score_set(root: Path, corpus: str, query_set: str, refs: list[RunRef], qrels
         return None, notes
     classes = {q.qid: q.cls for q in queries}
     class_names = list(dict.fromkeys(classes[q] for q in judged))
+    origins = {q.qid: q.origin for q in queries}
+    origin_names = [o for o in ("hand", "claude") if any(origins[q] == o for q in judged)]
     n_docs = len(corpus_mod.doc_files(paths.docs_dir(root, corpus)))
     graded = any(r > 1 for rels in qrels.values() for r in rels.values())
     result = {
@@ -159,6 +167,11 @@ def score_set(root: Path, corpus: str, query_set: str, refs: list[RunRef], qrels
             },
             "per_query": {q: {m: r6(v) for m, v in pq[q].items()} for q in judged},
         }
+        if origin_names:
+            result["systems"][ref.system]["by_origin"] = {
+                o: {"n": sum(1 for q in judged if origins[q] == o), **{m: r6(metrics.mean(pq, m, [q for q in judged if origins[q] == o])) for m in metrics.METRICS}}
+                for o in origin_names
+            }
     names = list(result["systems"])
     result["pairs"] = _pairs(names, per_query, judged)
     repeats: dict[str, dict] = {}
@@ -215,6 +228,8 @@ def score_answers(root: Path, cfg) -> tuple[dict, dict, list[str]]:
             "declined_out_wilson95": [r6(v) for v in stats.wilson(t["declined_out"], t["n_out"])],
         }  # fmt: skip
         results[f"{corpus}/{path.stem}"] = entry
+    # The repeats of one label answer the same questions, so they are not independent trials: each
+    # repeat keeps its own Wilson interval, and the spread is the range across repeats (no pooled interval).
     repeats: dict[str, dict] = {}
     for key, entry in results.items():
         parts = key.split("/", 1)[1].split(".")
@@ -223,11 +238,8 @@ def score_answers(root: Path, cfg) -> tuple[dict, dict, list[str]]:
             group["files"].append(entry["file"])
             group["verified_share"].append(entry["verified_share"])
             group["declined_out_share"].append(entry["declined_out_share"])
-            for f in ("verified", "n_in", "declined_out", "n_out"):
-                group[f] = group.get(f, 0) + entry[f]
     for group in repeats.values():
-        group["pooled_verified_wilson95"] = [r6(v) for v in stats.wilson(group["verified"], group["n_in"])]
-        group["pooled_declined_out_wilson95"] = [r6(v) for v in stats.wilson(group["declined_out"], group["n_out"])]
+        group["n_repeats"] = len(group["files"])
         for f in ("verified_share", "declined_out_share"):
             values = [v for v in group[f] if v is not None]
             group[f + "_range"] = r6(max(values) - min(values)) if values else None
@@ -269,11 +281,23 @@ def f3(x) -> str:
 
 
 def signed(x: float) -> str:
-    return f"{x:+.3f}"
+    """A signed number at 3 decimals; a value that rounds to zero but is not zero keeps enough
+    decimals to show its sign (-0.0002), so an interval that excludes zero never reads [.., -0.000]."""
+    x = float(x)
+    if x == 0:
+        return "+0.000"
+    for places in (3, 4, 5, 6):
+        if round(x, places) != 0:
+            return f"{x:+.{places}f}"
+    return f"{x:+.6f}"
 
 
 def interval(ci) -> str:
-    return f"[{ci[0]:+.3f}, {ci[1]:+.3f}]"
+    return f"[{signed(ci[0])}, {signed(ci[1])}]"
+
+
+def wilson_text(ci) -> str:
+    return f"[{ci[0]:.3f}, {ci[1]:.3f}]"
 
 
 def share(k: int, n: int) -> str:
@@ -303,12 +327,14 @@ def render_systems(s: dict) -> str:
     return table(["System"] + [METRIC_NAMES[m] for m in metrics.METRICS], rows) + "\n\n" + note
 
 
-def render_classes(s: dict, slug: str | None) -> str:
+def render_classes(s: dict, slug: str | None, key: str = "by_class") -> str:
     wanted = _metrics_for(slug)
     first = next(iter(s["systems"].values()))
-    classes = list(first["by_class"])
-    header = ["System", "Metric"] + [f"{c} (n={first['by_class'][c]['n']})" for c in classes]
-    rows = [[name, METRIC_NAMES[m]] + [f3(v["by_class"][c][m]) for c in classes] for name, v in s["systems"].items() for m in wanted]
+    if not first.get(key):
+        return "_Your queries have no origin column yet, so there is nothing to split._"
+    groups = list(first[key])
+    header = ["System", "Metric"] + [f"{c} (n={first[key][c]['n']})" for c in groups]
+    rows = [[name, METRIC_NAMES[m]] + [f3(v[key][c][m]) for c in groups] for name, v in s["systems"].items() for m in wanted]
     return table(header, rows, right=2)
 
 
@@ -322,6 +348,8 @@ def render_pairs(pairs: list[dict], slug: str | None) -> str:
     if not rows:
         return "_Only one system is scored here, so there is nothing to compare yet._"
     note = "The interval is a paired bootstrap (10,000 resamples of the queries); MDD is the smallest difference this many queries detect 80% of the time."
+    if any(p["reading"] == stats.IDENTICAL for p in pairs if p["metric"] in wanted):
+        note += " Two systems that score the same on every query have no interval to speak of, so their MDD is shown as -."
     return table(["Comparison", "Metric", "Mean difference", "95% interval", "MDD", "Reading"], rows, right=2, text_last=True) + "\n\n" + note
 
 
@@ -332,9 +360,9 @@ def render_answers(results: dict) -> str:
             continue
         rows.append([
             key.split("/", 1)[1], str(a["system"]),
-            share(a["verified"], a["n_in"]), interval(a["verified_wilson95"]).replace("+", ""),
+            share(a["verified"], a["n_in"]), wilson_text(a["verified_wilson95"]),
             share(a["not_found_in"], a["n_in"]),
-            share(a["declined_out"], a["n_out"]), interval(a["declined_out_wilson95"]).replace("+", ""),
+            share(a["declined_out"], a["n_out"]), wilson_text(a["declined_out_wilson95"]),
             f"{a['claims_verified']} of {a['claims']}",
         ])  # fmt: skip
     if not rows:
@@ -363,9 +391,10 @@ def render_repeats(results: dict) -> str:
         rows = []
         for f in g["files"]:
             a = results["answers"][f"{key.split('/', 1)[0]}/{Path(f).stem}"]
-            rows.append([Path(f).stem, share(a["verified"], a["n_in"]), interval(a["verified_wilson95"]).replace("+", ""), share(a["declined_out"], a["n_out"]), interval(a["declined_out_wilson95"]).replace("+", "")])
-        rows.append(["pooled", share(g["verified"], g["n_in"]), interval(g["pooled_verified_wilson95"]).replace("+", ""), share(g["declined_out"], g["n_out"]), interval(g["pooled_declined_out_wilson95"]).replace("+", "")])
-        parts.append(f"Repeated answers {key}:\n\n" + table(["File", "Verified (in)", "95% interval", "Declined (out)", "95% interval"], rows))
+            rows.append([Path(f).stem, share(a["verified"], a["n_in"]), wilson_text(a["verified_wilson95"]), share(a["declined_out"], a["n_out"]), wilson_text(a["declined_out_wilson95"])])
+        rows.append(["range (max minus min)", f3(g["verified_share_range"]), "", f3(g["declined_out_share_range"]), ""])
+        note = "Each repeat answers the same questions, so the repeats are not independent trials and their counts are not pooled into one interval."
+        parts.append(f"Repeated answers {key}:\n\n" + table(["File", "Verified (in)", "95% interval", "Declined (out)", "95% interval"], rows) + "\n\n" + note)
     if not parts:
         return "_No repeated runs or answers files yet (598E: `p2 run ... --repeat 3` and `p2 answer ... --repeat 3`)._"
     return "\n\n".join(parts)
@@ -383,9 +412,11 @@ def render(name: str, results: dict) -> str | None:
         rest = name[len(set_name) + 1 :].split("-") if name != set_name else []
         view = rest[0] if rest else None
         slug = rest[1] if len(rest) > 1 else None
-        if len(rest) > 2 or (view and view not in VIEWS) or (slug and slug not in METRIC_SLUGS) or (view == "ablation" and corpus != "own"):
+        if len(rest) > 2 or (view and view not in VIEWS) or (slug and slug not in METRIC_SLUGS) or (view in OWN_ONLY_VIEWS and corpus != "own"):
             return None
         s = results["sets"].get(f"{corpus}/{query_set}")
+        if view == "ablation" and not (s and any(n.startswith("ablation/") for n in s["systems"])):
+            return "_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._"
         if not s or not s["systems"]:
             where = "--corpus own" if corpus == "own" else f"--corpus shared --queries {query_set}"
             return f"_No scored runs here yet: run `uv run p2 run {where} --system bm25` (or `--all`), then `uv run p2 score`._"
@@ -393,11 +424,11 @@ def render(name: str, results: dict) -> str | None:
             return render_systems(s)
         if view == "classes":
             return render_classes(s, slug)
+        if view == "origins":
+            return render_classes(s, slug, key="by_origin")
         if view == "pairs":
             return render_pairs(s["pairs"], slug)
         ablations = [p for p in s["pairs"] if p["a"].startswith("ablation/") != p["b"].startswith("ablation/")]
-        if not any(n.startswith("ablation/") for n in s["systems"]):
-            return "_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/._"
         return render_pairs(ablations, slug)
     return None
 
@@ -477,22 +508,32 @@ def dumps(results: dict) -> str:
     return json.dumps(results, indent=2, ensure_ascii=False) + "\n"
 
 
+SET_NAMES = {"shared/practice": "shared practice queries", "shared/test": "shared test queries", "own/own": "own corpus"}
+
+
+def missing_blocks(text: str, section: str) -> list[str]:
+    """The tables EVAL.md must keep that it does not have (a block with a metric added counts)."""
+    names = set(blocks(text))
+    wanted = REQUIRED_BLOCKS + (RIDER_BLOCKS if section == "598E" else ())
+    return [w for w in wanted if not any(n == w or (n.startswith(w + "-") and n[len(w) + 1 :] in METRIC_SLUGS) for n in names)]
+
+
 def print_summary(results: dict) -> None:
     for key, s in results["sets"].items():
-        print(f"\n{key}: {s['n_queries']} judged queries")
+        print(f"\n{SET_NAMES.get(key, key)}: {s['n_queries']} judged queries")
         width = max(len(n) for n in s["systems"]) if s["systems"] else 6
         print(f"  {'system':<{width}}  recall@10  MRR@10  nDCG@10")
         for name, v in s["systems"].items():
             print(f"  {name:<{width}}  {v['mean']['recall@10']:9.3f}  {v['mean']['mrr@10']:6.3f}  {v['mean']['ndcg@10']:7.3f}")
         for p in s["pairs"]:
             if p["metric"] == "mrr@10":
-                print(f"  MRR@10 {p['a']} minus {p['b']}: {p['mean_diff']:+.3f} {interval(p['ci95'])}, {p['reading']}")
+                print(f"  MRR@10 {p['a']} minus {p['b']}: {signed(p['mean_diff'])} {interval(p['ci95'])}, {p['reading']}")
         if key == "own/own" and "bm25" in s["systems"]:
             best = max(v["mean"]["mrr@10"] for v in s["systems"].values())
             if s["systems"]["bm25"]["mean"]["recall@10"] >= TOO_EASY or best >= TOO_EASY:
                 print("  Note: a score of 0.95 or more suggests your queries are too easy to tell the systems apart; harder queries make the comparison mean more.")
     for key, a in results["answers"].items():
-        print(f"\nanswers {key}: verified {share(a['verified'], a['n_in'])}, not_found in {share(a['not_found_in'], a['n_in'])}, declined out {share(a['declined_out'], a['n_out'])}")
+        print(f"\nanswers {key.split('/', 1)[1]}: verified {share(a['verified'], a['n_in'])}, not_found in {share(a['not_found_in'], a['n_in'])}, declined out {share(a['declined_out'], a['n_out'])}")
 
 
 def run(args, cfg) -> int:

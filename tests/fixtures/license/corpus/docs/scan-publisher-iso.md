@@ -1,4 +1,4 @@
 # Pump note
 
 Pump notes.
-The ISO 9001 standard applies.
+This ISO 9001 copy is licensed to one user.

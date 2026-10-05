@@ -61,13 +61,17 @@ def format_chunks(hits: list[tuple[str, float]], texts: dict[str, str]) -> str:
     return "\n\n".join(f'<chunk id="{cid}">\n{texts[cid].strip()}\n</chunk>' for cid, _ in hits)
 
 
-def answer_one(system, name: str, question, texts: dict[str, str], system_prompt: str, cfg, tracer: Tracer) -> dict:
-    """Retrieve, ask Claude, and return the record for one question."""
+def build_prompt(hits: list[tuple[str, float]], texts: dict[str, str], question) -> str:
+    return USER_PROMPT.format(chunks=format_chunks(hits, texts), question=question.text)
+
+
+def answer_one(system, name: str, question, texts: dict[str, str], system_prompt: str, cfg, tracer: Tracer) -> tuple[dict, bool]:
+    """Retrieve, ask Claude, and return the record for one question, and whether the reply was a saved one."""
     with tracer.span(f"answer {name}", "chat", name, question.qid, model=cfg.model) as span:
         hits = system.search_chunks(question.text, cfg.answer_top)
         ids = [cid for cid, _ in hits]
         span["p2.top_ids"] = ids
-        prompt = USER_PROMPT.format(chunks=format_chunks(hits, texts), question=question.text)
+        prompt = build_prompt(hits, texts, question)
         reply = claude.call(prompt, SCHEMA, system=system_prompt, model=cfg.model, cache_dir=claude.cache_folder(cfg))
         record = {
             "qid": question.qid, "question": question.text, "kind": question.kind, "system": name,
@@ -82,7 +86,7 @@ def answer_one(system, name: str, question, texts: dict[str, str], system_prompt
             out = reply.output
             claims = [c for c in (out.get("claims") or []) if isinstance(c, dict)]
             record.update(answer=str(out.get("answer", "")), not_found=bool(out.get("not_found")), claims=claims)
-        return record
+        return record, reply.cached
 
 
 def run(args, cfg) -> int:
@@ -124,17 +128,35 @@ def run(args, cfg) -> int:
         print(f"{name} has no search_chunks(text, k), which p2 answer needs; add it (ChunkScorer gives it for free) or answer with another system.")
         return 1
     texts = corpus.chunk_texts(cfg.chunk_words, cfg.chunk_overlap)
-    print(f"{len(questions)} question(s), top {cfg.answer_top} chunks from {name}, {len(repeats)} time(s): {len(questions) * len(repeats)} claude -p call(s) on {cfg.model}.")
+    asks = len(questions) * len(repeats)
+    if retrievers.needs_claude(name):
+        # the system itself calls Claude to retrieve, so each question costs one call more
+        calls = 2 * asks
+        plan = f"up to {calls} claude -p call(s) on {cfg.model}, two per question because {name} calls Claude to retrieve"
+    else:
+        saved = 0
+        cache = claude.cache_folder(cfg)
+        if cache is not None:
+            for q in questions:
+                prompt = build_prompt(system.search_chunks(q.text, cfg.answer_top), texts, q)
+                saved += (cache / f"{claude.cache_key(prompt, SCHEMA, cfg.model, system_prompt)}.json").is_file()
+        calls = asks - saved
+        note = f", and {saved} saved repl{'y' if saved == 1 else 'ies'} that cost nothing" if saved else ""
+        plan = f"{calls} new claude -p call(s) on {cfg.model}{note}"
+    if not claude.confirm_calls(calls, f"This p2 answer with {name}", getattr(args, "yes", False)):
+        return 2
+    print(f"{len(questions)} question(s), top {cfg.answer_top} chunks from {name}, {len(repeats)} time(s): {plan}.")
     prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:16]
     for repeat in repeats:
         records = []
         started = time.perf_counter()
         with Tracer(paths.answers_trace(root, label, repeat)) as tracer:
             for n, q in enumerate(questions, 1):
-                record = answer_one(system, name, q, texts, system_prompt, cfg, tracer)
+                record, was_saved = answer_one(system, name, q, texts, system_prompt, cfg, tracer)
                 records.append(record)
                 state = "ERROR " + record["error"] if record.get("error") else ("not_found" if record["not_found"] else f"{len(record['claims'])} claim(s)")
-                print(f"[{n}/{len(questions)}] {q.qid} {record['seconds']:.1f} s, {record['input_tokens']:,} input tokens, {state}", flush=True)
+                cost = "saved reply, no call" if was_saved else f"{record['seconds']:.1f} s"
+                print(f"[{n}/{len(questions)}] {q.qid} {cost}, {record['input_tokens']:,} input tokens, {state}", flush=True)
         data = {
             "label": label, "system": name, "corpus": args.corpus, "model": cfg.model,
             "chunking": {"words": cfg.chunk_words, "overlap": cfg.chunk_overlap}, "top": cfg.answer_top,

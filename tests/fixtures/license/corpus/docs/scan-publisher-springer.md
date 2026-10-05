@@ -1,4 +1,4 @@
 # Pump note
 
 Pump notes.
-Springer Nature Switzerland AG.
+This chapter is licensed by Springer Nature Switzerland AG.

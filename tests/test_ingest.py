@@ -867,3 +867,69 @@ def test_a_long_markdown_file_is_split_into_numbered_parts(repo, src):
     ids = doc_ids(repo)
     assert len(ids) >= 3 and all(re.fullmatch(r"book__part0\d", i) for i in ids)
     assert manifest_rows(repo)[0][1] == "The book (part 1 of %d)" % len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Wave 2: shared metadata titles, per-file sources, --report, removed license lines, the path hint
+# ---------------------------------------------------------------------------
+
+
+def test_a_metadata_title_with_a_file_name_keeps_only_the_title():
+    assert ingest._usable_pdf_title("mcs2025.pdf - Mineral Commodity Summaries 2025") == "Mineral Commodity Summaries 2025"
+    assert ingest._usable_pdf_title("Mineral Commodity Summaries 2025 | mcs2025.pdf") == "Mineral Commodity Summaries 2025"
+    assert ingest._usable_pdf_title("Draft of report.docx for review") == ""
+    assert ingest._usable_pdf_title("A study of pump flow") == "A study of pump flow"
+
+
+@needs_pypdf
+def test_pdfs_that_share_a_metadata_title_start_with_their_file_name(repo, src, capsys):
+    for seed, name in enumerate(("mcs2024-aluminum", "mcs2024-antimony")):
+        pages = [sentence_lines(100 * seed + p, 10) for p in range(3)]
+        (src / f"{name}.pdf").write_bytes(build_pdf(pages, title="Mineral Commodity Summaries 2024"))
+    (src / "other.pdf").write_bytes(build_pdf(paper_pages()[:2], title="A study of pump flow"))
+    assert ingest.run(args_for(src, repo, source="https://pubs.usgs.gov/periodicals/mcs2024/{name}")) == 0
+    rows = {r[0]: r for r in manifest_rows(repo)}
+    assert rows["mcs2024-aluminum"][1] == "mcs2024 aluminum - Mineral Commodity Summaries 2024"
+    assert doc_text(repo, "mcs2024-antimony").startswith("# mcs2024 antimony - Mineral Commodity Summaries 2024\n")
+    assert rows["other"][1] == "A study of pump flow"
+    assert rows["mcs2024-aluminum"][2] == "https://pubs.usgs.gov/periodicals/mcs2024/mcs2024-aluminum.pdf"
+    assert "2 PDF files share a title" in capsys.readouterr().out
+
+
+def test_source_template_fills_in_each_file_name():
+    path = Path("raw/My Report.pdf")
+    assert ingest.source_for("https://example.org/r/{name}", path, "My Report.pdf") == "https://example.org/r/My%20Report.pdf"
+    assert ingest.source_for("USGS, {stem}", path, "My Report.pdf") == "USGS, My Report"
+    assert ingest.source_for(None, path, "sub/My Report.pdf") == "sub/My Report.pdf"
+
+
+def test_report_rewrites_ingest_md_for_the_documents_left(repo, src, capsys):
+    for i in range(3):
+        (src / f"note{i}.md").write_text(f"# Note {i}\n\n" + " ".join(words(30 + i, 80)), encoding="utf-8")
+    assert ingest.run(args_for(src, repo)) == 0
+    (corpus(repo) / "docs" / "note1.md").unlink()
+    assert ingest.run(argparse.Namespace(src_dir=None, into="own", report=True, root=str(repo))) == 0
+    report = (corpus(repo) / "INGEST.md").read_text(encoding="utf-8")
+    assert "- Documents: 2" in report and "`note1`" not in report and "`note2`" in report
+    assert "Rewrote corpora/own/INGEST.md: 2 document(s)" in capsys.readouterr().out
+
+
+@needs_pypdf
+def test_a_publisher_footer_the_cleaning_removes_is_kept_in_the_notes(repo, src):
+    from p2 import license as lic
+
+    pages = [[f"Pump text on page {p} goes on about pumps and flow."] + sentence_lines(40 + p, 12) + ["Downloaded from IEEE Xplore. Restrictions apply."] for p in range(1, 9)]
+    (src / "paper.pdf").write_bytes(build_pdf(pages))
+    assert ingest.run(args_for(src, repo, license="cc-by-4.0")) == 0
+    assert "IEEE Xplore" not in doc_text(repo, "paper")  # the running footer is gone from the text
+    notes = manifest_rows(repo)[0][4]
+    assert 'cleaning removed: publisher name "Downloaded from IEEE Xplore. Restrictions apply."' in notes
+    row = lic.offline_report(corpus(repo))[0]
+    assert row["status"] == "flag" and "a line ingest removed" in row["reason"]
+
+
+def test_a_missing_folder_says_where_it_looked(repo, capsys, monkeypatch):
+    monkeypatch.chdir(repo)
+    assert ingest.run(args_for("work/p2-raw", repo)) == 1
+    out = capsys.readouterr().out
+    assert "I looked for" in out and "../p2-raw" in out

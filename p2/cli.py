@@ -19,6 +19,7 @@ from pathlib import Path
 
 from p2 import config, metrics, paths, retrievers
 from p2 import corpus as corpus_mod
+from p2.claude import CONFIRM_ABOVE, confirm_calls
 from p2.runfile import read_qrels, read_queries, run_tag, write_run
 from p2.trace import Tracer
 
@@ -39,8 +40,9 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
     run.add_argument("--extra-corpus", type=Path, metavar="DIR", help="add the documents in DIR for this run only (never written to the repo)")
     run.add_argument("--out", type=Path, help="write the run file here instead of runs/ (default for --extra-corpus or a queries file of your own: .cache/extra/)")
-    run.add_argument("--all", action="store_true", help="every system on every query set you have, and every ablation run again")
+    run.add_argument("--all", action="store_true", help="bm25, dense, hybrid and rerank on every query set you have, and every other run file you have again")
     run.add_argument("--with-claude", action="store_true", help="with --all: also run the systems that call Claude")
+    run.add_argument("--yes", action="store_true", help=f"go ahead without asking when a command makes more than {CONFIRM_ABOVE} claude -p calls")
 
     sc = sub.add_parser("score", help="score runs and answers, write results/results.json, rewrite the EVAL.md tables")
     sc.add_argument("--test-qrels", type=Path, help=argparse.SUPPRESS)  # the instructor's hidden test judgments
@@ -53,15 +55,17 @@ def parser() -> argparse.ArgumentParser:
     an.add_argument("--only", help="only these question ids, for example a01,a09")
     an.add_argument("--repeat", type=int, default=0, metavar="N", help="598E: answer N times with fresh Claude replies, into .r1 to .rN files")
     an.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
+    an.add_argument("--yes", action="store_true", help=f"go ahead without asking when this makes more than {CONFIRM_ABOVE} claude -p calls")
 
     ve = sub.add_parser("verify", help="print the quote check for one answers file")
     ve.add_argument("file", nargs="?", help="an answers file (default: the newest one)")
 
     ing = sub.add_parser("ingest", help="turn a folder of documents into your own corpus (needs `uv sync --group ingest`)")
-    ing.add_argument("src_dir", metavar="SRC_DIR", help="the folder of PDF, HTML, Markdown or text files")
+    ing.add_argument("src_dir", metavar="SRC_DIR", nargs="?", help="the folder of PDF, HTML, Markdown or text files")
     ing.add_argument("--into", default="own", choices=["own"], help="the corpus to add to (own)")
     ing.add_argument("--license", help="the license of these documents, from the vocabulary in the README")
-    ing.add_argument("--source", help="where they came from (a URL or a citation)")
+    ing.add_argument("--source", help="where they came from (a URL or a citation); {name} and {stem} stand for each file's name, as in https://example.org/reports/{name}")
+    ing.add_argument("--report", action="store_true", help="rewrite corpora/own/INGEST.md for the documents there now (after you removed some), without reading a folder")
 
     lic = sub.add_parser("license", help="check the licenses of your own corpus and write LICENSES.md")
     lic.add_argument("--online", action="store_true", help="also ask Crossref, arXiv and PubMed Central (needs the internet)")
@@ -102,24 +106,32 @@ def checked(name: str, hits, corpus: corpus_mod.Corpus, k: int) -> list[tuple[st
     return hits
 
 
+def where(corpus: str, query_set: str) -> str:
+    """How a corpus and query set read in a sentence: "shared practice", "the own corpus"."""
+    return "the own corpus" if corpus == "own" else f"shared {query_set}"
+
+
 def run_one(cfg: config.Config, corpus: corpus_mod.Corpus, name: str, query_set: str, queries, out: Path, trace_path: Path, k: int, label: str) -> float | None:
     """Run one system over a query set, write the run file and the trace; returns MRR@10 when qrels exist."""
     started = time.perf_counter()  # building the index (encoding the chunks, say) is part of the time
     system = retrievers.build(name, corpus, cfg)
     model = getattr(system, "model", None)
+    calls_claude = retrievers.needs_claude(name)
     results = {}
     with Tracer(trace_path) as tracer:
         for n, q in enumerate(queries, 1):
+            if calls_claude:
+                # before the call, so a warning your reranker prints sits under the query it belongs to
+                print(f"  [{n}/{len(queries)}] {q.qid}", flush=True)
             with tracer.span(f"retrieval {name}", "retrieval", name, q.qid, model=model) as span:
                 hits = checked(name, system.search(q.text, k), corpus, k)
                 span["p2.top_ids"] = [d for d, _ in hits]
             results[q.qid] = hits
-            if retrievers.needs_claude(name):
-                print(f"  [{n}/{len(queries)}] {q.qid} {span['duration_ms'] / 1000:.1f} s", flush=True)
     write_run(out, results, tag=name, k=k)
     seconds = time.perf_counter() - started
     root = cfg.root
-    line = f"{label}: wrote {paths.rel(root, out)} ({len(queries)} queries, {seconds:.1f} s)"
+    line = f"{label}: wrote {paths.rel(root, out)} ({len(queries)} queries, {seconds:.1f} s"
+    line += f", {seconds / len(queries):.1f} s per query)" if calls_claude and queries else ")"
     qrels_path = paths.qrels(root, corpus.name, query_set) if query_set in ("practice", "test", "own") else None
     mrr = None
     if qrels_path and qrels_path.is_file():
@@ -146,6 +158,9 @@ def cmd_run(args, cfg: config.Config) -> int:
     if not paths.LABEL_RE.match(label):
         print(f"The label {label!r} can use lower-case letters, digits, _ and - only; pick another.")
         return 2
+    if label != args.system and label in retrievers.names():
+        print(f"The label {label!r} is the name of another system, and p2 check reads a run file named after a system as that system's; pick another label.")
+        return 2
     if args.ablation and args.corpus != "own":
         print("--ablation goes with --corpus own: ablations are measured on your own corpus.")
         return 2
@@ -171,8 +186,13 @@ def cmd_run(args, cfg: config.Config) -> int:
     if not corpus.docs:
         print(f"corpora/{args.corpus}/docs/ has no documents yet.")
         return 1
-    if retrievers.needs_claude(args.system):
-        print(f"{args.system} calls claude -p once per query: {len(queries) * max(1, args.repeat)} call(s) on {cfg.model}, fewer if replies are saved from before.")
+    calls_claude = retrievers.needs_claude(args.system)
+    if calls_claude:
+        calls = len(queries) * max(1, args.repeat)
+        saved = "every repeat asks Claude again" if args.repeat else ("--fresh asks Claude again" if args.fresh else "fewer if replies are saved from before")
+        if not confirm_calls(calls, f"This run of {args.system}", args.yes):
+            return 1 if sys.stdin is not None and sys.stdin.isatty() else 2
+        print(f"{args.system} calls claude -p once per query: {calls} call(s) on {cfg.model}, {saved}.")
     for repeat in range(1, args.repeat + 1) if args.repeat else [None]:
         if args.out:
             out = args.out if repeat is None else args.out.with_name(f"{args.out.stem}.r{repeat}{args.out.suffix}")
@@ -184,9 +204,9 @@ def cmd_run(args, cfg: config.Config) -> int:
             trace_path = out.with_name(out.stem + ".trace.jsonl")
         else:
             out = paths.run_file(root, args.corpus, query_set, label, repeat, args.ablation)
-            trace_path = paths.trace_file(root, args.corpus, query_set, label, repeat, args.ablation)
+            trace_path = paths.trace_file(root, args.corpus, query_set, label, repeat, args.ablation, calls_claude=calls_claude)
         try:
-            run_one(cfg, corpus, args.system, query_set, queries, out, trace_path, k, label + (f".r{repeat}" if repeat else ""))
+            run_one(cfg, corpus, args.system, query_set, queries, out, trace_path, k, label + (f".r{repeat}" if repeat else "") + f" on {where(args.corpus, query_set)}")
         except NotImplementedError as error:
             print(error)
             return 1
@@ -194,8 +214,16 @@ def cmd_run(args, cfg: config.Config) -> int:
 
 
 def run_all(args, cfg: config.Config) -> int:
+    """bm25, dense, hybrid and rerank on every query set, then every other run file again.
+
+    A system you added (an ablation variant, say) runs only where it already has a run file, so --all
+    never spreads it over query sets it was not meant for."""
+    from p2.score import discover
+
     root = cfg.root
-    jobs = []  # (corpus, query set, system, label, ablation)
+    names = retrievers.names()
+    canonical = [n for n in retrievers.CANONICAL if n in names]
+    sets = []  # (corpus, query set) pairs that have documents and queries
     for corpus in paths.CORPORA:
         if not corpus_mod.doc_files(paths.docs_dir(root, corpus)):
             print(f"Skipping the {corpus} corpus: it has no documents yet.")
@@ -205,17 +233,33 @@ def run_all(args, cfg: config.Config) -> int:
             if not qpath.is_file() or not read_queries(qpath)[0]:
                 print(f"Skipping {paths.rel(root, qpath)}: it has no queries yet.")
                 continue
-            for name in retrievers.names():
-                jobs.append((corpus, query_set, name, name, False))
-    for path in sorted((root / "runs" / "own" / "ablation").glob("*.trec")):
-        tag = run_tag(path)
-        if tag in retrievers.names():
-            jobs.append(("own", "own", tag, path.stem, True))
+            sets.append((corpus, query_set))
+    jobs = [(corpus, query_set, name, name, False) for corpus, query_set in sets for name in canonical]  # (corpus, query set, system, label, ablation)
+    refs, _odd = discover(root)
+    for ref in refs:
+        if ref.repeat is not None or (ref.corpus, ref.query_set) not in sets or (not ref.ablation and ref.name in canonical):
+            continue
+        tag = run_tag(ref.path)
+        if tag in names:
+            jobs.append((ref.corpus, ref.query_set, tag, ref.name, ref.ablation))
+    others = sorted(set(names) - set(canonical) - {job[2] for job in jobs})
+    if others:
+        print(f"Not run: {', '.join(others)}. --all runs the four systems of the brief everywhere, and a system you added only where it already has a run file.")
+    claude_jobs = [job for job in jobs if retrievers.needs_claude(job[2])]
+    if claude_jobs and args.with_claude:
+        sizes = {(c, q): len(read_queries(paths.queries(root, c, q))[0]) for c, q in sets}
+        calls = sum(sizes[(c, q)] for c, q, *_ in claude_jobs)
+        systems = ", ".join(sorted({j[3] for j in claude_jobs}))
+        if not confirm_calls(calls, f"Running {systems} on {len(claude_jobs)} query set(s)", args.yes):
+            return 1 if sys.stdin is not None and sys.stdin.isatty() else 2
+        print(f"With --with-claude this runs {systems} on {len(claude_jobs)} query set(s): up to {calls} claude -p call(s) on {cfg.model}, fewer if replies are saved from before.")
     status = 0
     loaded: dict[str, corpus_mod.Corpus] = {}
     for corpus_name, query_set, name, label, ablation in jobs:
-        if retrievers.needs_claude(name) and not args.with_claude:
-            print(f"{label}: skipped, it calls Claude (add --with-claude to run it too).")
+        shown = f"{'ablation/' if ablation else ''}{label} on {where(corpus_name, query_set)}"
+        calls_claude = retrievers.needs_claude(name)
+        if calls_claude and not args.with_claude:
+            print(f"{shown}: skipped, it calls Claude (add --with-claude to run it too).")
             continue
         corpus = loaded.setdefault(corpus_name, corpus_mod.load(root, corpus_name))
         queries, problems = read_queries(paths.queries(root, corpus_name, query_set), require_origin=corpus_name == "own")
@@ -224,11 +268,11 @@ def run_all(args, cfg: config.Config) -> int:
             status = 1
             continue
         out = paths.run_file(root, corpus_name, query_set, label, None, ablation)
-        trace_path = paths.trace_file(root, corpus_name, query_set, label, None, ablation)
+        trace_path = paths.trace_file(root, corpus_name, query_set, label, None, ablation, calls_claude=calls_claude)
         try:
-            run_one(cfg, corpus, name, query_set, queries, out, trace_path, args.k or cfg.k, f"{'ablation/' if ablation else ''}{label} on {corpus_name} {query_set}")
+            run_one(cfg, corpus, name, query_set, queries, out, trace_path, args.k or cfg.k, shown)
         except NotImplementedError:
-            print(f"{label}: not built yet (p2/retrievers/{name}.py still raises NotImplementedError).")
+            print(f"{shown}: not built yet (p2/retrievers/{name}.py still raises NotImplementedError).")
     return status
 
 

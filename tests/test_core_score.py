@@ -40,9 +40,9 @@ def test_pairs_with_two_systems(tmp_path):
     assert notes == []
     pairs = results["sets"]["shared/practice"]["pairs"]
     assert [(p["a"], p["b"], p["metric"]) for p in pairs] == [("other", "bm25", m) for m in ("recall@10", "mrr@10", "ndcg@10")]
-    assert all(p["mean_diff"] == 0 and p["reading"] == "not distinguishable" for p in pairs)
+    assert all(p["mean_diff"] == 0 and p["reading"] == "identical on every query" and p["mdd80"] is None for p in pairs)
     pairs_text = score.render("shared-practice-pairs-mrr", results)
-    assert "other minus bm25 | MRR@10 | +0.000 | [+0.000, +0.000]" in pairs_text
+    assert "other minus bm25 | MRR@10 | +0.000 | [+0.000, +0.000] | - | identical on every query |" in pairs_text
 
 
 def test_block_names():
@@ -73,15 +73,16 @@ def test_repeated_runs_and_answers_are_reported_with_spread_and_wilson(tmp_path,
     run(root, "run", "--corpus", "shared", "--queries", "practice", "--system", "bm25")
     assert run(root, "run", "--corpus", "shared", "--queries", "practice", "--system", "bm25", "--label", "again", "--repeat", "2") == 0
     monkeypatch.setattr(answer.claude, "call", fake_call)
-    assert run(root, "answer", "--system", "bm25", "--label", "rep", "--repeat", "2") == 0
+    assert run(root, "answer", "--system", "bm25", "--label", "rep", "--repeat", "2") == 2  # 6 calls: p2 asks first
+    assert run(root, "answer", "--system", "bm25", "--label", "rep", "--repeat", "2", "--yes") == 0
     results, _ = score.compute(root, config.load(root))
     entry = results["sets"]["shared/practice"]["repeats"]["again"]
     assert entry["repeat"] == [1, 2] and entry["spread"]["mrr@10"]["range"] == 0.0
     assert [c["reading"] for c in entry["vs"]["bm25"]["mrr@10"]] == ["not distinguishable"] * 2
     group = results["answer_repeats"]["shared/rep"]
-    assert (group["verified"], group["n_in"], group["declined_out"], group["n_out"]) == (4, 4, 2, 2)
-    assert group["pooled_verified_wilson95"][1] == 1.0
+    assert group["n_repeats"] == 2 and group["verified_share"] == [1.0, 1.0] and group["verified_share_range"] == 0.0
+    assert not any(k.startswith("pooled") for k in group)  # the repeats answer the same questions, so nothing is pooled
     text = score.render("repeats", results)
-    assert "again.r1" in text and "| pooled |" in text
+    assert "again.r1" in text and "| range (max minus min) | 0.000 |" in text and "| pooled |" not in text
     # Repeats stay out of the main tables and pairs.
     assert list(results["sets"]["shared/practice"]["systems"]) == ["bm25"]

@@ -13,6 +13,9 @@
 - With a cache folder, a reply is saved under a hash of everything sent, and the same call later
   returns the saved reply at no cost; pass no cache folder (or --fresh) to ask again.
 - The call's model and token counts are added to the open trace span (see p2/trace.py).
+- `p2 check` runs your systems again with Claude switched off (the P2_NO_CLAUDE environment
+  variable): a call then raises ClaudeBlocked, which is how the check learns that a system really
+  calls Claude. ClaudeBlocked is not an Exception, so an `except Exception` in your code lets it through.
 """
 
 from __future__ import annotations
@@ -31,12 +34,21 @@ from pathlib import Path
 from p2 import trace
 
 KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+NO_CLAUDE_VAR = "P2_NO_CLAUDE"
 TIMEOUT_S = 600
 _warned_keys = False
+blocked_calls = 0  # how many calls ClaudeBlocked stopped in this process (p2 check reads it)
 
 
 class ClaudeNotFound(RuntimeError):
     pass
+
+
+class ClaudeBlocked(BaseException):
+    """Raised by call() while Claude is switched off (P2_NO_CLAUDE is set), as it is inside p2 check.
+
+    It derives from BaseException, like KeyboardInterrupt, so a reranker that catches Exception to
+    keep its first-stage order on a failed call does not hide it."""
 
 
 @dataclass
@@ -56,6 +68,13 @@ def find_claude() -> str:
     path = shutil.which("claude")
     if not path:
         raise ClaudeNotFound("Could not find the claude command; install Claude Code (see setup.md in the course repo) and open a new terminal.")
+    if Path(path).suffix.lower() in (".cmd", ".bat", ".ps1"):
+        # Windows runs a .cmd or .bat file through cmd.exe, which cuts a command line at its first
+        # newline and treats & | < > % as commands, so a multi-line prompt or a JSON schema would arrive broken.
+        raise ClaudeNotFound(
+            f"The claude command here is {path}, a Windows script that cannot pass a multi-line prompt safely. "
+            "Install Claude Code with the official installer from setup.md in the course repo, open a new terminal, and check that `where claude` lists a claude.exe first."
+        )
     return path
 
 
@@ -113,6 +132,10 @@ def cache_key(prompt: str, schema: dict, model: str, system: str | None) -> str:
 
 def call(prompt: str, schema: dict, system: str | None = None, model: str = "sonnet", cache_dir: Path | None = None, timeout: int = TIMEOUT_S) -> Reply:
     """One claude -p call with no tools and a reply forced into `schema`."""
+    global blocked_calls
+    if os.environ.get(NO_CLAUDE_VAR):
+        blocked_calls += 1
+        raise ClaudeBlocked("Claude is switched off here (p2 check never calls Claude)")
     cache_file = Path(cache_dir) / f"{cache_key(prompt, schema, model, system)}.json" if cache_dir else None
     if cache_file and cache_file.is_file():
         saved = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -122,7 +145,9 @@ def call(prompt: str, schema: dict, system: str | None = None, model: str = "son
     cmd = command(find_claude(), schema, model, system)
     start = time.perf_counter()
     try:
-        with tempfile.TemporaryDirectory() as empty:  # an empty folder, so no CLAUDE.md is picked up
+        # An empty folder, so no CLAUDE.md is picked up; on Windows a virus scanner can hold it for a
+        # moment after the call, and a folder left behind must not lose the reply.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as empty:
             done = subprocess.run(
                 cmd, cwd=empty, env=child_env(), input=prompt, capture_output=True,
                 text=True, encoding="utf-8", errors="replace", timeout=timeout,
@@ -139,6 +164,32 @@ def call(prompt: str, schema: dict, system: str | None = None, model: str = "son
         saved = {"output": reply.output, "seconds": round(seconds, 1), "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens, "model": reply.model, "cost_usd": reply.cost_usd}
         cache_file.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8", newline="\n")
     return reply
+
+
+CONFIRM_ABOVE = 5  # more claude -p calls than this, and p2 asks first
+
+
+def confirm_calls(calls: int, what: str, yes: bool) -> bool:
+    """True when a command may make `calls` claude -p calls: few enough, --yes, or a yes at the prompt.
+
+    Without a terminal to ask in (Claude Code running the command, say), p2 stops and says how to go
+    ahead, so whoever runs it has to bring the number back to the student first."""
+    if calls <= CONFIRM_ABOVE or yes:
+        return True
+    message = f"{what} makes up to {calls} claude -p calls, which draw on your Claude plan (replies saved from an earlier run cost nothing)."
+    stdin = sys.stdin
+    if stdin is not None and stdin.isatty():
+        try:
+            answer = input(message + " Go ahead? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() in ("y", "yes"):
+            return True
+        print("Nothing was run.")
+        return False
+    print(message)
+    print("Nothing was run. To go ahead, run the same command again with --yes; if Claude Code is running it for you, it should tell you this number and ask you first.")
+    return False
 
 
 def cache_folder(cfg) -> Path | None:

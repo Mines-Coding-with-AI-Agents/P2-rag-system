@@ -19,9 +19,14 @@ The three checks:
    Anything with NC (non-commercial) or ND (no derivatives), `unknown`, `all-rights-reserved`, an empty value, or a value not on the list fails.
 2. The text scan.
    Each document is searched for things that contradict an open license: a copyright line, "All rights reserved",
-   a publisher's name (Elsevier, Springer, Wiley, IEEE, ACS, Taylor & Francis, SAGE, Cambridge or Oxford University Press, ASTM, ISO),
-   a CC BY-NC or BY-ND notice, "reprinted with permission", and the sentence US government reports use for third-party material.
+   a publisher's name (Elsevier, Springer, Wiley, IEEE, ACS, Taylor & Francis, SAGE, Cambridge or Oxford University Press, ASTM, ISO)
+   on a line with words about rights ("© 2020 Elsevier", "Published by Wiley", "IEEE Xplore. Restrictions apply."),
+   a CC BY-NC or BY-ND notice, "reprinted with permission", the sentence US government reports use for third-party material,
+   a contractor's notice ("prepared as an account of work sponsored by an agency of the United States Government"),
+   and a "courtesy of" credit line. Evidence that p2 ingest saw in the raw text and its cleaning removed
+   (a publisher footer on every page) is in the manifest notes, and counts the same.
    Every hit is a flag with the line it was found on.
+   A publisher's name with no words about rights on its line is usually a citation, so it is listed as a mention and is not a flag.
    A flag passes only when the manifest's `notes` column for that document says `reviewed: <reason>`,
    and the reason should quote the license text you read on the source page.
 3. The online lookup (--online, on your machine only, never in CI).
@@ -29,7 +34,7 @@ The three checks:
    A different license is a failure.
    If the service cannot be reached, the document is reported as "could not check" and that is not a failure.
 
-The `license-check` skill walks you through each failing or flagged document.
+The license-check skill, .claude/skills/license-check/SKILL.md, walks you through each failing or flagged document.
 """
 
 from __future__ import annotations
@@ -98,16 +103,37 @@ def check_license_value(value) -> tuple[bool, str]:
 # The text scan
 # ---------------------------------------------------------------------------
 
-_PUBLISHERS_CS = r"Elsevier|ELSEVIER|Springer|SPRINGER|Wiley|WILEY|IEEE|ACS|SAGE|ASTM|ISO"
-_PUBLISHERS_CI = r"(?i:Taylor\s*(?:&|and)\s*Francis|Cambridge\s+University\s+Press|Oxford\s+University\s+Press)"
+# Names in any case, and the acronyms in capitals only ("sage advice" and "iso-propyl" are not publishers).
+_PUBLISHERS = (
+    r"(?i:Elsevier|Springer|Wiley|Taylor\s*(?:&|and)\s*Francis|Cambridge\s+University\s+Press|Oxford\s+University\s+Press)"
+    r"|IEEE|ACS|SAGE|ASTM|ISO"
+)
+# A publisher's name counts as evidence only next to words about rights: "© 2021 Elsevier",
+# "Published by Wiley", "Downloaded from IEEE Xplore. Restrictions apply." On its own a name is
+# usually a citation or a mention ("see ASTM E2500", "ISO 8601", "the American Community Survey (ACS)"),
+# so it is listed in LICENSES.md as a mention and is not a flag.
+_RIGHTS_CUE = re.compile(
+    r"\xa9|\(c\)\s*(?:19|20)\d\d|\bcopyright|\ball\s+rights\b|\bpublish(?:ed|er|ing)\b|\bpermissions?\b|\blicen[cs](?:e|ed|ing)\b"
+    r"|\breprint|\breproduc|\bcourtesy\b|\brestrictions\s+apply\b|\bterms\s+of\s+use\b|\bxplore\b|\bon\s+behalf\s+of\b",
+    re.I,
+)
+_PUBLISHER_RE = re.compile(rf"\b(?:{_PUBLISHERS})\b")
+_PUBLISHER_MENTION_RE = re.compile(
+    r"\b(?:Elsevier|ELSEVIER|Springer|SPRINGER|Wiley|WILEY|IEEE|ACS|SAGE|ASTM|ISO)\b"
+    r"|(?i:\bTaylor\s*(?:&|and)\s*Francis\b|\bCambridge\s+University\s+Press\b|\bOxford\s+University\s+Press\b)"
+)
 
 SCAN_PATTERNS: list[tuple[str, re.Pattern]] = [
     (
         "copyright line",
-        re.compile(r"\xa9|(?<![\w)])\(c\)\s*(?:19|20)\d\d\b|\bcopyright\b\s*(?:\xa9|\(c\))?\s*(?:19|20)\d\d\b", re.I),
+        re.compile(
+            r"\xa9|(?<![\w)])\(c\)\s*(?:19|20)\d\d\b|\bcopyright\b\s*(?:\xa9|\(c\))?\s*(?:19|20)\d\d\b"
+            r"|\bcopyright(?:ed)?\s+(?:by\s+)?(?-i:(?!Act\b|Office\b|Law\b|Clearance\b)[A-Z][A-Za-z&'-]+(?:\s+[A-Z][A-Za-z&'-]+)*)",
+            re.I,
+        ),
     ),
     ("all rights reserved", re.compile(r"\ball\s+rights\s+reserved\b", re.I)),
-    ("publisher name", re.compile(rf"\b(?:{_PUBLISHERS_CS})\b|\b{_PUBLISHERS_CI}\b")),
+    ("publisher name", _PUBLISHER_RE),  # only on a line with rights wording; see scan_text
     (
         "NC or ND notice",
         re.compile(
@@ -131,23 +157,65 @@ SCAN_PATTERNS: list[tuple[str, re.Pattern]] = [
             re.I,
         ),
     ),
+    (
+        "contractor notice",
+        re.compile(
+            r"prepared\s+as\s+an\s+account\s+of\s+work\s+sponsored\s+by\s+an\s+agency\s+of\s+the\s+United\s+States\s+Government"
+            r"|\bunder\s+contract\s+(?:no\.?\s*|number\s+)?[A-Z]{2,}[-\s]?[A-Z0-9-]{4,}"
+            r"|\boperated\s+by\s+.{1,80}?\s+for\s+the\s+(?:U\.\s?S\.|United\s+States)\s+Department\s+of\s+Energy",
+            re.I,
+        ),
+    ),
+    ("credit line", re.compile(r"\bcourtesy\s+of\b", re.I)),
 ]
+# The kinds a reviewed note has to clear; a "publisher mentioned" hit is only listed.
+FLAG_KINDS = {kind for kind, _ in SCAN_PATTERNS}
+MENTION = "publisher mentioned"
+
+
+def _line_at(text: str, start: int, end: int) -> tuple[int, str]:
+    line_no = text.count("\n", 0, start) + 1
+    first = text.rfind("\n", 0, start) + 1
+    last = text.find("\n", end)
+    last = len(text) if last < 0 else last
+    return line_no, " ".join(text[first:last].split())
 
 
 def scan_text(text: str) -> list[dict]:
-    """Find lines that contradict an open license. Each hit: kind, line_no (1-based), line, match."""
+    """Find lines that contradict an open license. Each hit: kind, line_no (1-based), line, match.
+
+    A publisher's name is a flag ("publisher name") on a line that also has words about rights, and
+    a "publisher mentioned" hit otherwise, which LICENSES.md lists but which needs no review."""
     hits: dict[tuple[int, str], dict] = {}
     for kind, rx in SCAN_PATTERNS:
         for m in rx.finditer(text):
-            line_no = text.count("\n", 0, m.start()) + 1
+            line_no, line = _line_at(text, m.start(), m.end())
+            if kind == "publisher name" and not _RIGHTS_CUE.search(_PUBLISHER_RE.sub(" ", line)):
+                continue
             if (line_no, kind) in hits:
                 continue
-            start = text.rfind("\n", 0, m.start()) + 1
-            end = text.find("\n", m.end())
-            end = len(text) if end < 0 else end
-            line = " ".join(text[start:end].split())
             hits[(line_no, kind)] = {"kind": kind, "line_no": line_no, "line": line[:200], "match": " ".join(m.group(0).split())}
+    flagged_lines = {n for n, k in hits if k == "publisher name"}
+    for m in _PUBLISHER_MENTION_RE.finditer(text):
+        line_no, line = _line_at(text, m.start(), m.end())
+        if line_no not in flagged_lines and (line_no, MENTION) not in hits:
+            hits[(line_no, MENTION)] = {"kind": MENTION, "line_no": line_no, "line": line[:200], "match": " ".join(m.group(0).split())}
     return sorted(hits.values(), key=lambda h: (h["line_no"], h["kind"]))
+
+
+REMOVED_RE = re.compile(r"cleaning removed: (.*)$", re.I)
+
+
+def removed_hits(notes) -> list[dict]:
+    """Evidence `p2 ingest` saw in the raw text and its cleaning pass removed (a publisher footer on
+    every page, say), as it wrote it in the manifest notes: `cleaning removed: <kind> "<line>" | ...`."""
+    m = REMOVED_RE.search(str(notes or "").split("reviewed:")[0])
+    out = []
+    for kind, line in re.findall(r'([a-z -]+?) "([^"]*)"', m.group(1) if m else ""):
+        kind = kind.strip(" |;")
+        if kind in FLAG_KINDS:
+            out.append({"kind": kind, "line_no": 0, "line": line, "match": line})
+    return out
 
 
 def reviewed_reason(notes) -> str:
@@ -211,17 +279,24 @@ def _read_manifest(path: Path) -> tuple[list[dict], list[Row]]:
     return rows, problems
 
 
-def _fmt_hits(hits: list[dict], per_kind: int = 2) -> str:
+def _where(h: dict) -> str:
+    return f"line {h['line_no']}" if h["line_no"] else "a line ingest removed"
+
+
+def _fmt_hits(hits: list[dict], per_kind: int = 2, quote: int = 110) -> str:
     """One short phrase per kind of hit: how many lines, and the first lines themselves."""
     groups: dict[str, list[dict]] = {}
     for h in hits:
         groups.setdefault(h["kind"], []).append(h)
     parts = []
     for kind, items in groups.items():
-        shown = "; ".join(f"line {h['line_no']}: \"{h['line'][:110]}\"" for h in items[:per_kind])
+        shown = "; ".join(f"{_where(h)}: \"{h['line'][:quote]}\"" for h in items[:per_kind])
         more = f" (and {len(items) - per_kind} more)" if len(items) > per_kind else ""
         parts.append(f"{kind} on {len(items)} line{'s' if len(items) != 1 else ''} ({shown}{more})")
     return "; ".join(parts)
+
+
+FLAG_ACTION = "read the source, then write `reviewed: <reason with the quote>` in the notes, or remove the document"
 
 
 def offline_report(corpus_dir) -> list[Row]:
@@ -254,7 +329,7 @@ def offline_report(corpus_dir) -> list[Row]:
     for docid in sorted(set(entries) | set(doc_files)):
         entry = entries.get(docid)
         path = doc_files.get(docid)
-        base = {"docid": docid, "title": "", "source": "", "license": "", "notes": "", "flags": [], "reviewed": "", "online": []}
+        base = {"docid": docid, "title": "", "source": "", "license": "", "notes": "", "flags": [], "mentions": [], "reviewed": "", "online": []}
         if entry is None:
             results.append(Row(**base, status="fail", reason="there is a document but no manifest row, so no license is recorded; add a row, or remove the document"))
             continue
@@ -263,18 +338,21 @@ def offline_report(corpus_dir) -> list[Row]:
             results.append(Row(**base, status="fail", reason=f"the manifest lists it but docs/{docid}.md does not exist"))
             continue
         ok, why = check_license_value(entry["license"])
-        hits = scan_text(path.read_text(encoding="utf-8"))
+        found = scan_text(path.read_text(encoding="utf-8")) + removed_hits(entry["notes"])
+        hits = [h for h in found if h["kind"] != MENTION]
+        mentions = [h for h in found if h["kind"] == MENTION]
         reviewed = reviewed_reason(entry["notes"])
-        base.update(flags=hits, reviewed=reviewed)
+        base.update(flags=hits, mentions=mentions, reviewed=reviewed)
+        mentioned = f"mentions {', '.join(dict.fromkeys(h['match'] for h in mentions))} without words about rights on the same line, which is not a flag" if mentions else ""
         if not ok:
             reason = why + (f"; the text scan also found {len(hits)} thing(s) to look at" if hits else "")
             results.append(Row(**base, status="fail", reason=reason))
         elif hits and not reviewed:
-            results.append(Row(**base, status="flag", reason=_fmt_hits(hits) + "; read the source, then write `reviewed: <reason with the quote>` in the notes, or remove the document"))
+            results.append(Row(**base, status="flag", reason=_fmt_hits(hits) + "; " + FLAG_ACTION, evidence=_fmt_hits(hits, per_kind=1, quote=60)))
         elif hits:
             results.append(Row(**base, status="ok", reason=f"reviewed: {reviewed}"))
         else:
-            results.append(Row(**base, status="ok", reason=""))
+            results.append(Row(**base, status="ok", reason=mentioned))
     return sorted(results, key=lambda r: r["docid"])
 
 
@@ -285,6 +363,7 @@ def offline_report(corpus_dir) -> list[Row]:
 # Verified against the live services on 2026-10-04 (see the notes in each lookup).
 
 CROSSREF_URL = "https://api.crossref.org/works/{doi}"
+SKILL_FILE = ".claude/skills/license-check/SKILL.md"
 ARXIV_URL = "https://oaipmh.arxiv.org/oai?verb=GetRecord&identifier=oai:arXiv.org:{id}&metadataPrefix=arXivRaw"
 PMC_LIST_URL = "https://pmc-oa-opendata.s3.amazonaws.com/?list-type=2&prefix={pmcid}.&delimiter=/"
 PMC_META_URL = "https://pmc-oa-opendata.s3.amazonaws.com/metadata/{pmcid}.{version}.json"
@@ -688,7 +767,7 @@ def render_report(corpus_name: str, rows: list[Row], online: bool) -> str:
             "",
             "## Next",
             "",
-            "Ask Claude Code to walk you through each failing or flagged document with the license-check skill.",
+            f"Ask Claude Code to read `{SKILL_FILE}` and walk you through each failing or flagged document with it.",
             "For each one you open the source page, quote the license text, and then either fix the manifest, write `reviewed: <reason with the quote>` in the notes, or remove the document.",
         ]
     return "\n".join(lines) + "\n"
@@ -726,7 +805,11 @@ def run(args) -> int:
     online = bool(getattr(args, "online", False))
     rows = offline_report(corpus_dir)
     if online and rows:
-        _say(f"Asking Crossref, arXiv and PubMed Central about {len(rows)} document(s); this can take a minute ...")
+        lookups = sum(1 for r in rows if any(extract_ids(r.get("source", "")).values()))
+        if lookups:
+            _say(f"Asking Crossref, arXiv and PubMed Central about the {lookups} document(s) whose source has a DOI, an arXiv id or a PubMed Central id; this can take a minute ...")
+        else:
+            _say("None of your sources has a DOI, an arXiv id or a PubMed Central id, so there is nothing to look up online.")
         online_check(rows)
     report = render_report(corpus_name, rows, online)
     out = root / "LICENSES.md"
@@ -736,20 +819,25 @@ def run(args) -> int:
     if online:
         checks = [c for r in rows for c in r["online"]]
         unreachable = sum(1 for c in checks if c["verdict"] == "could not check")
-        _say(f"Online: {len(checks)} lookup(s), {unreachable} could not be checked" + (" (is the internet reachable?)" if unreachable == len(checks) and checks else "."))
+        if checks:
+            _say(f"Online: {len(checks)} lookup(s), {unreachable} could not be checked" + (" (is the internet reachable?)" if unreachable == len(checks) else "."))
     bad = [r for r in rows if r["status"] != "ok"]
     ok = len(rows) - len(bad)
     if not rows:
         _say(f"There are no documents in corpora/{corpus_name} yet, so there is nothing to check. Wrote {out.name}.")
         return 0
     for r in bad[:25]:
-        reason = r["reason"] if len(r["reason"]) <= 240 else r["reason"][:237].rstrip() + "..."
+        reason = r["reason"]
+        if r["status"] == "flag" and r.get("evidence"):
+            reason = f"{r['evidence']}; {FLAG_ACTION}"  # the quotes are cut short so the next step always shows
+        elif len(reason) > 240:
+            reason = reason[:237].rsplit(" ", 1)[0] + " ..."
         _say(f"{r['status'].upper():<5} {r['docid']}: {reason}")
     if len(bad) > 25:
         _say(f"... and {len(bad) - 25} more; they are all in {out.name}")
     _say(f"{len(rows)} document(s): {ok} ok, {sum(1 for r in bad if r['status'] == 'flag')} flagged, {sum(1 for r in bad if r['status'] == 'fail')} failing. Wrote {out.name}.")
     if bad:
-        _say("Ask Claude Code to walk you through them with the license-check skill. The tool gathers evidence; the decision, and the responsibility, are yours.")
+        _say(f"Ask Claude Code to read {SKILL_FILE} and walk you through them with it. The tool gathers evidence; the decision, and the responsibility, are yours.")
         return 1
     _say("Nothing looked wrong to the tool. That is evidence, not proof: you remain responsible for what you commit.")
     return 0

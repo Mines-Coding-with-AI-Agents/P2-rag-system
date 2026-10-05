@@ -17,7 +17,7 @@ def test_run_writes_run_file_and_trace(tmp_path, capsys):
     lines = (root / "runs" / "shared" / "bm25.practice.trec").read_text(encoding="utf-8").splitlines()
     assert lines[0].startswith("p01 Q0 cfr30-75.403 1 ")
     assert all(line.endswith(" bm25") for line in lines)
-    spans = trace.read(root / "traces" / "shared-practice-bm25.jsonl")
+    spans = trace.read(root / "traces" / "retrieval" / "shared-practice-bm25.jsonl")
     assert [s["p2.qid"] for s in spans] == ["p01", "p02", "p03"]
     assert spans[0]["semconv"] == trace.SEMCONV and spans[0]["gen_ai.operation.name"] == "retrieval"
     assert spans[0]["p2.top_ids"][0] == "cfr30-75.403"
@@ -28,8 +28,8 @@ def test_run_all_skips_stubs_and_claude_systems(tmp_path, capsys):
     root = make_repo(tmp_path)
     assert run(root, "run", "--all") == 0
     out = capsys.readouterr().out
-    assert "dense: not built yet" in out
-    assert "rerank: skipped, it calls Claude" in out
+    assert "dense on shared practice: not built yet" in out
+    assert "rerank on shared practice: skipped, it calls Claude" in out
     assert "Skipping the own corpus" in out
     assert sorted(p.name for p in (root / "runs" / "shared").iterdir()) == ["bm25.practice.trec", "bm25.test.trec"]
 

@@ -12,7 +12,7 @@ Each prompt ends with a marker line that you replace with your own writing; `uv 
 Write what you measured, including what did not work.
 What I read for is whether each claim matches its interval, not whether the result is good news.
 
-Words used below: MRR@10, recall@10 and nDCG@10 are the three scores from lecture 14, each averaged over the queries of a set.
+Words used below: recall@10, MRR@10 and nDCG@10 are the three scores, each averaged over the queries of a set; step 7 of stage 1 in the README defines them, and lecture 14 goes deeper.
 A paired interval is the 95% interval of the mean difference between two systems on the same queries, found by resampling the queries 10,000 times.
 When an interval includes zero, the gold set cannot tell the two systems apart, and the right words are "not distinguishable on this gold set".
 The minimum detectable difference is the smallest gap this many queries could reliably show, so a difference below it is invisible to this gold set, not absent.
@@ -112,6 +112,12 @@ The same scores per query class.
 _No scored runs here yet: run `uv run p2 run --corpus own --system bm25` (or `--all`), then `uv run p2 score`._
 <!-- p2:end own-classes -->
 
+The same scores for the queries you wrote yourself (`hand`) and the ones a model drafted (`claude`).
+
+<!-- p2:begin own-origins -->
+_No scored runs here yet: run `uv run p2 run --corpus own --system bm25` (or `--all`), then `uv run p2 score`._
+<!-- p2:end own-origins -->
+
 Differences between every pair of systems.
 
 <!-- p2:begin own-pairs -->
@@ -133,7 +139,7 @@ Write your hypothesis here before you run it, in one sentence with a direction: 
 The run file for it lives in `runs/own/ablation/`.
 
 <!-- p2:begin own-ablation -->
-_No scored runs here yet: run `uv run p2 run --corpus own --system bm25` (or `--all`), then `uv run p2 score`._
+_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._
 <!-- p2:end own-ablation -->
 
 What did you change, what happened, and does the interval support the claim you want to make?
@@ -180,6 +186,7 @@ The options are in the brief.
 ## 9. 598E only - repeats and the pre-registered claim
 
 498E students can leave this section as it is; nothing checks it.
+598E students replace each line that starts with "598E: write", and `uv run p2 check --final` counts those lines as work still to do until they are gone.
 
 ### Repeats on the shared corpus
 

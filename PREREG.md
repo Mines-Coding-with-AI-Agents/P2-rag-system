@@ -7,10 +7,11 @@ Its value is that the claim can be wrong in a way anyone can check, and that you
 A well-powered result that says "no effect as large as the one I cared about" scores as well as a confirmation, so you have no reason to bend the claim.
 
 **Git history is how I will know the order.**
-Commit this file, filled in through section 4, before the first commit that puts a judgment line into `eval/own/qrels.txt`.
-`uv run p2 check --final` reads `git log` to confirm it, and a copy that was committed afterwards fails.
+Commit this file, filled in through section 4, before the first commit that puts a judgment line into `eval/own/qrels.txt` (or any other file under `eval/own/`).
+`uv run p2 check` reads `git log` to find the first commit in which sections 1 to 4 have no TODO marker left and some words of yours in each, and confirms that it comes before your first judgment; a copy that was filled in afterwards fails.
+Right after that commit, `p2 check` names it and waits for your first judgment; it asks for section 5 separately, once you have scored your own corpus.
 You may ingest your corpus and write queries first, but not the relevance judgments.
-After that first commit, do not edit sections 1 to 4.
+After that first commit, do not edit sections 1 to 4, because `p2 check` compares them with the commit where you filled them in.
 If something must change, add a dated entry in section 6 and leave the original as it was.
 
 You need your stage 1 scores for section 3, so score the shared corpus first.
@@ -50,9 +51,13 @@ Here sd is the standard deviation of the per-query differences between your two 
 Compute it from your stage 1 runs for the same two systems, or the nearest pair you have, and say which pair you used.
 With only 20 practice queries the sd is itself noisy, so be generous and round up.
 
-Two numbers to calibrate against.
+Some numbers to calibrate against.
 At sd 0.3 and Δ 0.10 the formula gives about 71 queries, and with the t distribution's small-sample correction it is a few more, about 73.
 At sd 0.3, a gold set of 30 queries can only detect a difference of about 0.15, which is why 30 queries cannot support a claim about a gap of 0.10.
+The spreads you will measure on the shared practice queries are mostly larger than 0.3: from about 0.31 for `hybrid` against `bm25` to about 0.66 for `dense` against `bm25`.
+For `rerank` against `hybrid` the sd is about 0.39, so a Δ of 0.10 needs about 120 queries, 0.15 about 55, and 0.20 about 31.
+Choose Δ and the size of your gold set together: the smallest effect that matters to a user, and a number of queries you can write and judge in the time you have.
+If the two do not meet, say which one you gave ground on and why.
 
 After you score the own corpus, the minimum detectable difference that `uv run p2 score` prints for your two systems is this same calculation run the other way.
 It should come out at or below your Δ.

@@ -49,10 +49,14 @@ def run_file(root: Path, corpus: str, query_set: str, name: str, repeat: int | N
     return root / "runs" / "shared" / f"{name}.{query_set}{suffix}.trec"
 
 
-def trace_file(root: Path, corpus: str, query_set: str, name: str, repeat: int | None = None, ablation: bool = False) -> Path:
+def trace_file(root: Path, corpus: str, query_set: str, name: str, repeat: int | None = None, ablation: bool = False, *, calls_claude: bool) -> Path:
+    """The trace of a run. A system that calls Claude writes it in traces/, where it is committed as the
+    record of what the calls cost and what Claude returned; the others write it in traces/retrieval/,
+    which git ignores because it changes on every run."""
     suffix = f".r{repeat}" if repeat else ""
     middle = f"ablation-{name}" if ablation else name
-    return root / "traces" / f"{corpus}-{query_set}-{middle}{suffix}.jsonl"
+    folder = root / "traces" if calls_claude else root / "traces" / "retrieval"
+    return folder / f"{corpus}-{query_set}-{middle}{suffix}.jsonl"
 
 
 def answers_file(root: Path, corpus: str, label: str, repeat: int | None = None) -> Path:

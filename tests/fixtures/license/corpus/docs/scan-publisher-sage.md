@@ -1,4 +1,4 @@
 # Pump note
 
 Pump notes.
-SAGE Publications Ltd.
+Reprints and permissions: SAGE Publications Ltd.

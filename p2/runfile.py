@@ -32,9 +32,11 @@ def order(pairs: Iterable[tuple[str, float]]) -> list[tuple[str, float]]:
 
 
 def data_lines(path: Path) -> list[tuple[int, str]]:
-    """(line number, line) for every line that is not blank and does not start with #."""
+    """(line number, line) for every line that is not blank and does not start with #.
+
+    A byte order mark at the start (Excel and Notepad add one when they save) is ignored."""
     out = []
-    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         if line.strip() and not line.startswith("#"):
             out.append((n, line))
     return out

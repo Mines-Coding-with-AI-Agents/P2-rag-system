@@ -10,6 +10,10 @@ For one query word w in chunk c:
     idf(w)  = ln(1 + (N - df(w) + 0.5) / (df(w) + 0.5))      N chunks, df(w) chunks containing w
     part    = idf(w) * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(c) / avg_len))
 and a chunk's score is the sum of the parts over the distinct query words.
+
+A query that shares words with fewer than k documents still gets k lines: the rest score 0 and come
+in document id order, as every ChunkScorer ranks ties. Those lines are padding, not matches; a padded
+document counts in the scores only when it happens to be relevant.
 """
 
 from __future__ import annotations

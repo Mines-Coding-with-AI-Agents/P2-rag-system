@@ -22,8 +22,10 @@ Course-owned contract, leave as is:
 - the autograder runs the instructor's copy of `p2 check --final`, so a local edit to a contract file cannot help and would show in git history
 - if one looks buggy, show the student the evidence and have them report it to the instructor
 
-Written by commands, never by hand: `runs/`, `answers/`, `traces/`, `results/results.json`, the tables between `<!-- p2:begin NAME -->` and `<!-- p2:end NAME -->` in `EVAL.md`, `LICENSES.md`, `corpora/own/INGEST.md`.
-`p2 check` runs every system that does not call Claude again and compares its runs, recomputes `results/results.json` and the tables, and checks that every answers file cites real chunks, so a hand edit there turns CI red.
+Written by commands, never by hand: `runs/`, `answers/`, `traces/`, `results/results.json`, the tables between `<!-- p2:begin NAME -->` and `<!-- p2:end NAME -->` in `EVAL.md`, `LICENSES.md`, `corpora/own/INGEST.md` (`uv run p2 ingest --report` rewrites it after documents are removed).
+`p2 check` runs every system again in a separate process with Claude switched off: the runs of systems that do not call Claude must match, and the runs of systems that do must match the traces committed with them in `traces/`.
+It also recomputes `results/results.json` and the tables, requires every table in `EVAL.md` to stay, pins `corpora/shared/` and `eval/shared/` to `p2/shared.sha256`, and checks that every answers file's retrieved chunks are real.
+A run file named after a system (`dense.practice.trec`) must be written by that system, so never use `--label` to name one system's run after another.
 
 ## Commands
 
@@ -48,7 +50,8 @@ A new dependency goes in through `uv add`, and `uv.lock` is committed with it, b
 - Run `uv run p2 check` before every push and keep CI green.
   A `FAIL` line names the next step, an unfinished-work line exits 0, and `--final` is the submission bar.
 - `claude -p` runs on the student's own Claude plan, through `p2/claude.py` only.
-  Before a command that makes many calls (the reranker over a query set, `p2 answer`), say how many calls it makes, try two or three first (`--only` for answers), and ask before the full run.
+  Before a command that makes many calls (the reranker over a query set, `p2 answer`, `p2 run --all --with-claude`), say how many calls it makes, try two or three first (`--only` for answers, a two-line queries file for runs), and ask before the full run.
+  `p2` stops by itself before more than 5 calls and prints the number; add `--yes` only after the student has said yes to that number.
 - A corpus document needs a license from the `p2 license` vocabulary.
-  Walk a failing or flagged document through the `license-check` skill, and write `reviewed: <reason with the quote>` in `notes` only after quoting the license text from the source page.
+  Walk a failing or flagged document through the license-check skill (read `.claude/skills/license-check/SKILL.md` in this repo and follow it), and write `reviewed: <reason with the quote>` in `notes` only after quoting the license text from the source page.
 - Keep keys, tokens and private files out of the repo; it is public, and so is its history.

@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   test:
-    if: github.repository == 'Mines-Coding-with-AI-Agents/P2-rag-system'
+    if: github.event.repository.is_template || github.repository == 'Mines-Coding-with-AI-Agents/P2-rag-system'
     name: test (${{ matrix.os }}, Python ${{ matrix.python || '3.12' }})
     strategy:
       fail-fast: false
@@ -55,7 +55,7 @@ jobs:
         run: uv run --frozen p2 check
 
   lint:
-    if: github.repository == 'Mines-Coding-with-AI-Agents/P2-rag-system'
+    if: github.event.repository.is_template || github.repository == 'Mines-Coding-with-AI-Agents/P2-rag-system'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

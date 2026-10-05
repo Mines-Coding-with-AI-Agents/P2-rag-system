@@ -1,4 +1,4 @@
 # Pump note
 
 Pump notes.
-See ASTM E2500 for the practice.
+ASTM E2500, a licensed copy for one user.

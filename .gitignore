@@ -10,11 +10,10 @@ dist/
 # Model downloads, cached vectors and cached Claude replies (rebuilt on demand)
 .cache/
 
-# Retrieval traces change on every run, so git ignores them.
-# Traces of answers and of reranked runs record what the Claude calls cost, so they are committed.
-traces/*.jsonl
-!traces/answers-*.jsonl
-!traces/*rerank*.jsonl
+# Traces of answers and of systems that call Claude (in traces/) record what the calls cost and what
+# Claude returned, so they are committed; p2 check reads them. The retrieval traces of the other
+# systems (in traces/retrieval/) change on every run, so git ignores them.
+traces/retrieval/
 
 # Editors and operating systems
 .DS_Store

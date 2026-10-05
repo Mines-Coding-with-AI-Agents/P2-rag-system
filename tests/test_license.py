@@ -106,19 +106,25 @@ def test_nc_and_nd_are_tokens_not_substrings():
         ("All rights reserved.", "all rights reserved"),
         ("all rights\nreserved", "all rights reserved"),
         ("Published by Elsevier B.V.", "publisher name"),
-        ("ELSEVIER", "publisher name"),
-        ("Springer Nature", "publisher name"),
-        ("John Wiley & Sons, Wiley Online Library", "publisher name"),
-        ("IEEE Transactions", "publisher name"),
-        ("Journal of the ACS", "publisher name"),
-        ("Taylor & Francis", "publisher name"),
-        ("Taylor and Francis", "publisher name"),
-        ("taylor & francis", "publisher name"),
-        ("SAGE Publications", "publisher name"),
-        ("Cambridge University Press", "publisher name"),
-        ("oxford university press", "publisher name"),
-        ("ASTM E2500", "publisher name"),
-        ("ISO 9001", "publisher name"),
+        ("published by elsevier B.V.", "publisher name"),
+        ("ELSEVIER. Reprints and permissions: see the journal site", "publisher name"),
+        ("This chapter is licensed by Springer Nature", "publisher name"),
+        ("Published by John Wiley & Sons, Wiley Online Library", "publisher name"),
+        ("Downloaded from IEEE Xplore. Restrictions apply.", "publisher name"),
+        ("Reprinted from the Journal of the ACS", "publisher name"),
+        ("Published by Taylor & Francis", "publisher name"),
+        ("Copyright Taylor and Francis", "publisher name"),
+        ("published by taylor & francis", "publisher name"),
+        ("Reprints and permissions: SAGE Publications", "publisher name"),
+        ("Published by Cambridge University Press", "publisher name"),
+        ("oxford university press, on behalf of the society", "publisher name"),
+        ("ASTM E2500, a licensed copy", "publisher name"),
+        ("ISO 9001, reproduced under license", "publisher name"),
+        ("Copyright ACME Corporation. Reproduced under license.", "copyright line"),
+        ("This report was prepared as an account of work sponsored by an agency of the United States Government.", "contractor notice"),
+        ("Battelle Memorial Institute under Contract DE-AC05-76RL01830", "contractor notice"),
+        ("operated by Battelle for the U.S. Department of Energy", "contractor notice"),
+        ("Modified from Smith and others (2019), courtesy of the American Geophysical Union", "credit line"),
         ("licensed under CC BY-NC 4.0", "NC or ND notice"),
         ("CC BY-ND", "NC or ND notice"),
         ("cc-by-nc-sa", "NC or ND notice"),
@@ -152,12 +158,51 @@ def test_every_scan_pattern_finds_its_hit(text, kind):
         "The undergraduate read section 75.403(c) 2000 pounds of rock.",
         "Wileyan style in Sagebrush station, ISOtope label.",
         "A copyright law course covers fair use.",
+        "The Copyright Act of 1976 is a federal law.",
         "ordinary text with (a) and (b) lists",
         "The pump is rated at 1999 gallons.",
+        "Section 75.403(c) applies to sage, iso-propyl and acs units.",
     ],
 )
 def test_scan_leaves_lookalikes_alone(text):
     assert lic.scan_text(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See ASTM E2500 for the practice.",
+        "a profile of ISO 8601 dates",
+        "IEEE 754 double precision",
+        "The American Community Survey (ACS) counts households.",
+        "the Advanced Camera for Surveys (ACS) on Hubble",
+        "Professor Wiley Post flew around the world.",
+        "SAGE grouse habitat",
+        "Smith, J., 2019, Nickel deposits: Springer, Berlin, 300 p.",
+    ],
+)
+def test_a_publisher_name_without_words_about_rights_is_only_a_mention(text):
+    hits = lic.scan_text(text)
+    assert hits and {h["kind"] for h in hits} == {lic.MENTION}
+
+
+def test_a_mention_is_listed_but_does_not_flag_the_document(report):
+    row = by_id(report)["clean-publisher-mentions"]
+    assert row["status"] == "ok" and not row["flags"]
+    assert "mentions ASTM, ACS, IEEE without words about rights" in row["reason"] and "not a flag" in row["reason"]
+
+
+def test_evidence_that_cleaning_removed_is_read_from_the_notes(tmp_path):
+    corpus = tmp_path / "own"
+    (corpus / "docs").mkdir(parents=True)
+    (corpus / "docs" / "paper.md").write_text("# Paper\n\nPump notes.\n", encoding="utf-8")
+    note = 'file: paper.pdf; cleaning removed: publisher name "Downloaded from IEEE Xplore. Restrictions apply."'
+    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{note}\n", encoding="utf-8")
+    row = lic.offline_report(corpus)[0]
+    assert row["status"] == "flag" and "a line ingest removed" in row["reason"]
+    reviewed = note + '; reviewed: the page says "This article is licensed under CC BY 4.0" (https://x)'
+    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{reviewed}\n", encoding="utf-8")
+    assert lic.offline_report(corpus)[0]["status"] == "ok"
 
 
 def test_hit_carries_line_number_and_the_matching_line():
@@ -251,6 +296,8 @@ SCAN_DOCS = {
     "scan-usgs-sentence": "third-party material",
     "scan-usgs-sentence-gov": "third-party material",
     "scan-many-hits": "publisher name",
+    "scan-contractor-notice": "contractor notice",
+    "scan-credit-line": "credit line",
 }
 
 
@@ -277,7 +324,7 @@ def test_many_hits_are_summarised_not_listed_in_full(report):
     assert len(row["flags"]) >= 7  # all of them stay in flags
 
 
-@pytest.mark.parametrize("docid", ["clean-lookalikes", "clean-iso-inside-word"])
+@pytest.mark.parametrize("docid", ["clean-lookalikes", "clean-iso-inside-word", "clean-publisher-mentions"])
 def test_lookalike_text_is_not_flagged(report, docid):
     assert by_id(report)[docid]["status"] == "ok"
 

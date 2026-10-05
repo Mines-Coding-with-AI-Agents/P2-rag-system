@@ -111,7 +111,7 @@ class Corpus:
 
 
 def read_doc(path: Path) -> Doc:
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8-sig")  # a byte order mark from a Windows editor is not part of the text
     first = text.split("\n", 1)[0]
     title = first[2:].strip() if first.startswith("# ") else ""
     return Doc(path.stem, title, text, path)
@@ -157,7 +157,7 @@ def check_docs(folder: Path) -> list[str]:
             problems.append(f"{path.name} has a document id that is not allowed (lower-case letters, digits, . _ and -)")
             continue
         try:
-            text = path.read_bytes().decode("utf-8")
+            text = path.read_bytes().decode("utf-8-sig")
         except UnicodeDecodeError:
             problems.append(f"{path.name} is not UTF-8 text")
             continue

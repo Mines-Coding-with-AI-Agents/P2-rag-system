@@ -9,9 +9,13 @@ Where the idea is:
   rerank_one() shows the top 20 as numbered passages, RERANK_SCHEMA forces the reply into
   {"order": [20 numbers]}, a reply that is not each number once keeps the original order, and the
   documents below the 20 keep their order underneath;
+- when you port RERANK_SCHEMA, also give its items "minimum": 1 and "maximum": 20 (the number of
+  passages), so Claude cannot answer with a number that names no passage: the lab's schema only
+  fixes how many numbers come back, and a reply such as [12, 2, 60, ...] silently keeps the first-stage order;
 - make every call through p2.claude.call(prompt, schema, model=cfg.model,
   cache_dir=p2.claude.cache_folder(cfg)), which launches claude -p the way the lab does, caches
-  replies, and records the tokens in the run's trace;
+  replies, and records the tokens in the run's trace (traces/, which you commit with the run file:
+  p2 check reads it, because CI never calls Claude to run this system again);
 - get the first stage with p2.retrievers.build("hybrid", corpus, cfg).
 
 `p2 answer --system rerank` also needs search_chunks(text, k): the same reranking over the first
