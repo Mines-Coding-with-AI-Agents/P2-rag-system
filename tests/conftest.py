@@ -31,7 +31,7 @@ def add_system():
 
     def add(name: str, source: str) -> str:
         path = folder / f"{name}.py"
-        path.write_text(textwrap.dedent(source), encoding="utf-8")
+        path.write_text(textwrap.dedent(source), encoding="utf-8", newline="\n")
         created.append(path)
         importlib.invalidate_caches()
         return name

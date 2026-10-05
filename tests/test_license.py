@@ -195,13 +195,13 @@ def test_a_mention_is_listed_but_does_not_flag_the_document(report):
 def test_evidence_that_cleaning_removed_is_read_from_the_notes(tmp_path):
     corpus = tmp_path / "own"
     (corpus / "docs").mkdir(parents=True)
-    (corpus / "docs" / "paper.md").write_text("# Paper\n\nPump notes.\n", encoding="utf-8")
+    (corpus / "docs" / "paper.md").write_text("# Paper\n\nPump notes.\n", encoding="utf-8", newline="\n")
     note = 'file: paper.pdf; cleaning removed: publisher name "Downloaded from IEEE Xplore. Restrictions apply."'
-    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{note}\n", encoding="utf-8")
+    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{note}\n", encoding="utf-8", newline="\n")
     row = lic.offline_report(corpus)[0]
     assert row["status"] == "flag" and "a line ingest removed" in row["reason"]
     reviewed = note + '; reviewed: the page says "This article is licensed under CC BY 4.0" (https://x)'
-    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{reviewed}\n", encoding="utf-8")
+    (corpus / "manifest.tsv").write_text(f"docid\ttitle\tsource\tlicense\tnotes\npaper\tPaper\thttps://x\tcc-by-4.0\t{reviewed}\n", encoding="utf-8", newline="\n")
     assert lic.offline_report(corpus)[0]["status"] == "ok"
 
 
@@ -370,14 +370,14 @@ def test_offline_report_accepts_the_docs_folder_too():
 def test_empty_and_missing_corpora(tmp_path):
     assert lic.offline_report(tmp_path) == []
     (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("# A\n\nText.\n", encoding="utf-8")
+    (tmp_path / "docs" / "a.md").write_text("# A\n\nText.\n", encoding="utf-8", newline="\n")
     rows = lic.offline_report(tmp_path)  # a document and no manifest at all
     assert [(r["docid"], r["status"]) for r in rows] == [("a", "fail")]
 
 
 def test_manifest_with_a_wrong_header_fails_once(tmp_path):
     (tmp_path / "docs").mkdir()
-    (tmp_path / "manifest.tsv").write_text("id\tname\nx\ty\n", encoding="utf-8")
+    (tmp_path / "manifest.tsv").write_text("id\tname\nx\ty\n", encoding="utf-8", newline="\n")
     rows = lic.offline_report(tmp_path)
     assert rows[0]["status"] == "fail"
     assert "header" in rows[0]["reason"]
@@ -613,9 +613,9 @@ def make_corpus(tmp_path, rows):
     lines = ["docid\ttitle\tsource\tlicense\tnotes"]
     for docid, source, license_, notes in rows:
         lines.append(f"{docid}\tT\t{source}\t{license_}\t{notes}")
-        (docs / f"{docid}.md").write_text("# T\n\nPlain text without any trouble.\n", encoding="utf-8")
-    (tmp_path / "corpora" / "own" / "manifest.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (tmp_path / "p2.toml").write_text("", encoding="utf-8")
+        (docs / f"{docid}.md").write_text("# T\n\nPlain text without any trouble.\n", encoding="utf-8", newline="\n")
+    (tmp_path / "corpora" / "own" / "manifest.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    (tmp_path / "p2.toml").write_text("", encoding="utf-8", newline="\n")
     return tmp_path / "corpora" / "own"
 
 
@@ -680,7 +680,7 @@ def test_manifest_saved_by_excel_with_a_byte_order_mark_and_crlf_is_read(tmp_pat
 
 def test_an_online_restriction_is_added_to_an_existing_flag(tmp_path):
     corpus = make_corpus(tmp_path, [("gov", "10.1016/j.jmb.2005.01.025", "us-gov-public-domain", "")])
-    (corpus / "docs" / "gov.md").write_text("# T\n\nPublished by Elsevier.\n", encoding="utf-8")
+    (corpus / "docs" / "gov.md").write_text("# T\n\nPublished by Elsevier.\n", encoding="utf-8", newline="\n")
     rows = lic.online_check(lic.offline_report(corpus), get=all_services(), sleep=lambda s: None)
     assert rows[0]["status"] == "flag"
     assert "publisher name" in rows[0]["reason"] and "online check:" in rows[0]["reason"]
@@ -745,16 +745,16 @@ def test_run_returns_zero_when_everything_is_ok(tmp_path, capsys):
 
 def test_run_returns_nonzero_for_an_unreviewed_flag_and_zero_once_reviewed(tmp_path):
     corpus = make_corpus(tmp_path, [("a", "x", "cc-by-4.0", "")])
-    (corpus / "docs" / "a.md").write_text("# T\n\n\xa9 2019 Someone\n", encoding="utf-8")
+    (corpus / "docs" / "a.md").write_text("# T\n\n\xa9 2019 Someone\n", encoding="utf-8", newline="\n")
     assert lic.run(run_args(tmp_path)) == 1
     manifest = corpus / "manifest.tsv"
-    manifest.write_text(manifest.read_text(encoding="utf-8").replace("cc-by-4.0\t", 'cc-by-4.0\treviewed: footer says "CC BY 4.0"'), encoding="utf-8")
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("cc-by-4.0\t", 'cc-by-4.0\treviewed: footer says "CC BY 4.0"'), encoding="utf-8", newline="\n")
     assert lic.run(run_args(tmp_path)) == 0
     assert "of which 1 had a flag that you reviewed" in (tmp_path / "LICENSES.md").read_text(encoding="utf-8")
 
 
 def test_run_with_no_documents_is_not_an_error(tmp_path, capsys):
-    (tmp_path / "p2.toml").write_text("", encoding="utf-8")
+    (tmp_path / "p2.toml").write_text("", encoding="utf-8", newline="\n")
     assert lic.run(run_args(tmp_path)) == 0
     assert (tmp_path / "LICENSES.md").exists()
     assert "nothing to check" in capsys.readouterr().out
@@ -797,7 +797,7 @@ def test_output_never_fails_on_a_console_that_cannot_show_a_character(monkeypatc
     import io
     import sys
 
-    fake = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+    fake = io.TextIOWrapper(io.BytesIO(), encoding="ascii", newline="\n")
     monkeypatch.setattr(sys, "stdout", fake)
     lic._say("quote: " + chr(169) + " 2019")
     fake.flush()

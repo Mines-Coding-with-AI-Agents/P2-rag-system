@@ -63,7 +63,7 @@ def test_tampered_run_and_hand_edited_results_fail(tmp_path):
     results_path = root / "results" / "results.json"
     data = json.loads(results_path.read_text(encoding="utf-8"))
     data["sets"]["shared/practice"]["systems"]["bm25"]["mean"]["mrr@10"] = 0.99
-    results_path.write_text(json.dumps(data), encoding="utf-8")
+    results_path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
     path = root / "runs" / "shared" / "bm25.practice.trec"
     text = path.read_text(encoding="utf-8").replace("cfr30-75.403", "cfr30-75.400", 1)
     path.write_text(text, encoding="utf-8", newline="\n")
@@ -123,8 +123,8 @@ def rider_item(root, start="598E: PREREG.md sections"):
 def make_rider_repo(tmp_path):
     root = make_repo(tmp_path)
     toml = root / "p2.toml"
-    toml.write_text(toml.read_text(encoding="utf-8").replace('section = "498E"', 'section = "598E"'), encoding="utf-8")
-    (root / "PREREG.md").write_text(TEMPLATE_PREREG, encoding="utf-8")
+    toml.write_text(toml.read_text(encoding="utf-8").replace('section = "498E"', 'section = "598E"'), encoding="utf-8", newline="\n")
+    (root / "PREREG.md").write_text(TEMPLATE_PREREG, encoding="utf-8", newline="\n")
     git(root, "init", "-q")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "template")
@@ -132,13 +132,13 @@ def make_rider_repo(tmp_path):
 
 
 def commit_qrels(root, path="eval/own/qrels.txt"):
-    (root / path).write_text("# qid 0 docid rel\no01 0 doc-1 1\n", encoding="utf-8")
+    (root / path).write_text("# qid 0 docid rel\no01 0 doc-1 1\n", encoding="utf-8", newline="\n")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "judgments")
 
 
 def commit_prereg(root, text, message="prereg"):
-    (root / "PREREG.md").write_text(text, encoding="utf-8")
+    (root / "PREREG.md").write_text(text, encoding="utf-8", newline="\n")
     git(root, "commit", "-q", "-am", message)
 
 
@@ -211,7 +211,7 @@ def test_rider_answers_must_cover_every_question_in_every_repeat(tmp_path, monke
 
 def test_rider_prose_lines_in_eval_md_count_as_todo(tmp_path):
     root = make_rider_repo(tmp_path)
-    (root / "EVAL.md").write_text(EVAL_MD.replace("TODO: write it.", "Written.") + "\n598E: write the repeats result here.\n", encoding="utf-8")
+    (root / "EVAL.md").write_text(EVAL_MD.replace("TODO: write it.", "Written.") + "\n598E: write the repeats result here.\n", encoding="utf-8", newline="\n")
     item = next(i for i in statuses(root) if i.what == "EVAL.md has no TODO markers left")
     assert item.status == "TODO" and "598E: write" in item.detail
 
@@ -342,7 +342,7 @@ def test_a_claude_run_is_checked_against_its_trace(tmp_path, add_system, monkeyp
     lines = [i.line() for i in statuses(root)]
     assert any(line.startswith("PASS committed runs match a fresh run") and "testonly_llm call Claude" in line for line in lines), lines
     spans = trace_path.read_text(encoding="utf-8").splitlines()
-    trace_path.write_text("\n".join(spans[:-1]) + "\n", encoding="utf-8")
+    trace_path.write_text("\n".join(spans[:-1]) + "\n", encoding="utf-8", newline="\n")
     bad = {i.what: i.detail for i in fails(statuses(root))}
     assert "has no span for p03" in bad["runs/shared/testonly_llm.practice.trec matches its Claude trace"]
     trace_path.unlink()
@@ -406,7 +406,7 @@ def test_a_deleted_eval_table_fails(tmp_path):
     path = root / "EVAL.md"
     text = path.read_text(encoding="utf-8")
     start, end = text.index("<!-- p2:begin shared-practice -->"), text.index("<!-- p2:end shared-practice -->")
-    path.write_text(text[:start] + "| bm25 | 0.999 |" + text[end + len("<!-- p2:end shared-practice -->") :], encoding="utf-8")
+    path.write_text(text[:start] + "| bm25 | 0.999 |" + text[end + len("<!-- p2:end shared-practice -->") :], encoding="utf-8", newline="\n")
     bad = {i.what: i.detail for i in fails(statuses(root))}
     assert "1 table(s) are missing, such as shared-practice" in bad["EVAL.md tables match a fresh `p2 score`"]
 
@@ -429,9 +429,9 @@ def test_a_manifest_saved_with_a_byte_order_mark_is_read(tmp_path):
     docs = root / "corpora" / "own" / "docs"
     rows = ["docid\ttitle\tsource\tlicense\tnotes"]
     for i in range(3):
-        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8")
+        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8", newline="\n")
         rows.append(f"doc-{i}\tDoc {i}\tmy notes\town-work\t")
-    (root / "corpora" / "own" / "manifest.tsv").write_text("﻿" + "\n".join(rows) + "\n", encoding="utf-8")
+    (root / "corpora" / "own" / "manifest.tsv").write_text("﻿" + "\n".join(rows) + "\n", encoding="utf-8", newline="\n")
     items = {i.what: i for i in statuses(root)}
     assert items["own corpus documents and manifest"].status == "PASS"
     assert items["own corpus licenses (p2 license, offline)"].status == "PASS"
@@ -442,10 +442,10 @@ def test_corpus_over_the_token_limit_fails_and_a_stale_ingest_report_is_a_todo(t
     docs = root / "corpora" / "own" / "docs"
     rows = ["docid\ttitle\tsource\tlicense\tnotes"]
     for i in range(3):
-        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8")
+        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8", newline="\n")
         rows.append(f"doc-{i}\tDoc {i}\tmy notes\town-work\t")
-    (root / "corpora" / "own" / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    (root / "corpora" / "own" / "INGEST.md").write_text("# Ingest report\n\n- Documents: 4\n\n| `doc-0` | 6 | - | - | - |\n| `doc-9` | 6 | - | - | - |\n", encoding="utf-8")
+    (root / "corpora" / "own" / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
+    (root / "corpora" / "own" / "INGEST.md").write_text("# Ingest report\n\n- Documents: 4\n\n| `doc-0` | 6 | - | - | - |\n| `doc-9` | 6 | - | - | - |\n", encoding="utf-8", newline="\n")
     monkeypatch.setattr(check, "OWN_TOKEN_LIMIT", 10)
     items = {i.what: i for i in statuses(root)}
     size = items["own corpus size (at most 25 MB, 10 MB per file and about 500,000 tokens)"]
@@ -476,12 +476,12 @@ def test_notes_point_at_a_hollow_gold_set_without_failing(tmp_path):
     docs = root / "corpora" / "own" / "docs"
     rows = ["docid\ttitle\tsource\tlicense\tnotes"]
     for i in range(5):
-        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8")
+        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8", newline="\n")
         rows.append(f"doc-{i}\tDoc {i}\tmy notes\town-work\t")
-    (root / "corpora" / "own" / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    (root / "corpora" / "own" / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
     patterned = "".join(f"o{n}\tmixed\tvalve requirement number {n} for pumps\tclaude\n" for n in range(3, 6))
-    (root / "eval" / "own" / "queries.tsv").write_text("o01\tmixed\tpumps and valves\thand\no02\tmixed\tPumps, and valves?\tclaude\n" + patterned, encoding="utf-8")
-    (root / "eval" / "own" / "qrels.txt").write_text("".join(f"{q} 0 doc-{i} 1\n" for q in ("o01", "o02", "o3", "o4", "o5") for i in range(5)), encoding="utf-8")
+    (root / "eval" / "own" / "queries.tsv").write_text("o01\tmixed\tpumps and valves\thand\no02\tmixed\tPumps, and valves?\tclaude\n" + patterned, encoding="utf-8", newline="\n")
+    (root / "eval" / "own" / "qrels.txt").write_text("".join(f"{q} 0 doc-{i} 1\n" for q in ("o01", "o02", "o3", "o4", "o5") for i in range(5)), encoding="utf-8", newline="\n")
     run(root, "run", "--corpus", "own", "--system", "bm25")
     run(root, "score")
     notes = {i.what: i.detail for i in statuses(root) if i.status == "NOTE"}

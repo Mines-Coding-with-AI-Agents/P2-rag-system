@@ -64,7 +64,7 @@ def test_ablation_run_goes_to_its_folder_and_is_rerun_by_all(tmp_path):
     path = root / "runs" / "own" / "ablation" / "chunks-small.trec"
     assert path.read_text(encoding="utf-8").startswith("o01 Q0 doc-1 1 ")
     path.unlink()
-    path.parent.joinpath("chunks-small.trec").write_text("o01 Q0 doc-0 1 0.100000 bm25\n", encoding="utf-8")
+    path.parent.joinpath("chunks-small.trec").write_text("o01 Q0 doc-0 1 0.100000 bm25\n", encoding="utf-8", newline="\n")
     assert run(root, "run", "--all") == 0
     assert path.read_text(encoding="utf-8").startswith("o01 Q0 doc-1 1 ")
     assert (root / "runs" / "own" / "bm25.trec").is_file()
@@ -79,7 +79,7 @@ def test_score_with_test_qrels_writes_only_the_out_file(tmp_path):
     root = make_repo(tmp_path)
     run(root, "run", "--corpus", "shared", "--queries", "test", "--system", "bm25")
     qrels = tmp_path / "private.qrels.txt"
-    qrels.write_text("t01 0 cfr30-56.14131 1\nt02 0 cfr30-56.14107 1\n", encoding="utf-8")
+    qrels.write_text("t01 0 cfr30-56.14131 1\nt02 0 cfr30-56.14107 1\n", encoding="utf-8", newline="\n")
     out = tmp_path / "graded.json"
     assert run(root, "score", "--test-qrels", str(qrels), "--out", str(out)) == 0
     graded = json.loads(out.read_text(encoding="utf-8"))
@@ -90,7 +90,7 @@ def test_score_with_test_qrels_writes_only_the_out_file(tmp_path):
 def test_a_queries_file_of_your_own_writes_outside_runs(tmp_path):
     root = make_repo(tmp_path)
     queries = tmp_path / "mine.queries.tsv"
-    queries.write_text("m01\tparaphrase\trock dust\n", encoding="utf-8")
+    queries.write_text("m01\tparaphrase\trock dust\n", encoding="utf-8", newline="\n")
     assert run(root, "run", "--corpus", "shared", "--queries", str(queries), "--system", "bm25") == 0
     assert (root / ".cache" / "extra" / "bm25.mine.trec").is_file()
     assert not (root / "runs").exists()

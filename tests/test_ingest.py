@@ -155,7 +155,7 @@ def args_for(src, root, **kw):
 def repo(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    (root / "p2.toml").write_text("", encoding="utf-8")
+    (root / "p2.toml").write_text("", encoding="utf-8", newline="\n")
     return root
 
 
@@ -448,15 +448,15 @@ def test_output_never_fails_on_a_console_that_cannot_show_a_character(monkeypatc
 
 def test_a_file_with_a_non_ascii_name_gets_an_ascii_id(repo, src):
     name = "Caf" + chr(233) + " " + chr(0x6587) + " notes.md"
-    (src / name).write_text("# Notes\n\n" + " ".join(words(9, 70)), encoding="utf-8")
+    (src / name).write_text("# Notes\n\n" + " ".join(words(9, 70)), encoding="utf-8", newline="\n")
     assert ingest.run(args_for(src, repo)) == 0
     assert doc_ids(repo) == ["cafe-notes"]
     assert manifest_rows(repo)[0][2] == name  # the source column keeps the real file name
 
 
 def test_an_interrupted_run_still_leaves_a_manifest_row_for_every_document_written(repo, src, monkeypatch):
-    (src / "a.md").write_text("# A\n\n" + " ".join(words(11, 60)), encoding="utf-8")
-    (src / "b.md").write_text("# B\n\n" + " ".join(words(12, 60)), encoding="utf-8")
+    (src / "a.md").write_text("# A\n\n" + " ".join(words(11, 60)), encoding="utf-8", newline="\n")
+    (src / "b.md").write_text("# B\n\n" + " ".join(words(12, 60)), encoding="utf-8", newline="\n")
     real = ingest.process_file
 
     def interrupt_on_b(path, rel, docid):
@@ -472,8 +472,8 @@ def test_an_interrupted_run_still_leaves_a_manifest_row_for_every_document_writt
 
 
 def test_a_failure_while_cleaning_one_file_is_reported_and_the_others_are_added(repo, src, monkeypatch, capsys):
-    (src / "a.md").write_text("# A\n\n" + " ".join(words(13, 60)), encoding="utf-8")
-    (src / "b.md").write_text("# B\n\n" + " ".join(words(14, 60)), encoding="utf-8")
+    (src / "a.md").write_text("# A\n\n" + " ".join(words(13, 60)), encoding="utf-8", newline="\n")
+    (src / "b.md").write_text("# B\n\n" + " ".join(words(14, 60)), encoding="utf-8", newline="\n")
     real = ingest.build_units
 
     def explode_on_b(docid, rel, extracted, kind):
@@ -581,9 +581,9 @@ def test_office_files_are_refused_with_a_pointer_to_pdf(repo, src, capsys):
 
 def test_spreadsheets_hidden_and_unknown_files_are_not_added(repo, src, capsys):
     copy_fixtures(src, "data.csv", "figure.png", ".hidden.md", "notes.md")
-    (src / "~$lock.docx").write_text("lock", encoding="utf-8")
+    (src / "~$lock.docx").write_text("lock", encoding="utf-8", newline="\n")
     (src / ".git").mkdir()
-    (src / ".git" / "config.md").write_text("# hidden dir\n\nbody text here", encoding="utf-8")
+    (src / ".git" / "config.md").write_text("# hidden dir\n\nbody text here", encoding="utf-8", newline="\n")
     assert ingest.run(args_for(src, repo)) == 0
     assert doc_ids(repo) == ["notes"]
     out = capsys.readouterr().out
@@ -614,10 +614,10 @@ def test_license_and_source_options(repo, src, capsys):
 
 
 def test_ids_come_from_file_names(repo, src):
-    (src / "Taylor 1994 - TN1297.md").write_text("# Guidelines\n\n" + " ".join(words(1, 80)), encoding="utf-8")
+    (src / "Taylor 1994 - TN1297.md").write_text("# Guidelines\n\n" + " ".join(words(1, 80)), encoding="utf-8", newline="\n")
     sub = src / "Week 3"
     sub.mkdir()
-    (sub / "Taylor 1994 - TN1297.md").write_text("# Another\n\n" + " ".join(words(2, 80)), encoding="utf-8")
+    (sub / "Taylor 1994 - TN1297.md").write_text("# Another\n\n" + " ".join(words(2, 80)), encoding="utf-8", newline="\n")
     ingest.run(args_for(src, repo))
     ids = doc_ids(repo)
     assert ids == ["taylor-1994-tn1297", "week-3-taylor-1994-tn1297"]
@@ -639,9 +639,9 @@ def test_running_twice_adds_nothing_the_second_time(repo, src, capsys):
 
 def test_exact_duplicates_are_skipped_by_normalized_text(repo, src, capsys):
     text = "# Pump note\n\n" + " ".join(words(5, 120)) + "\n"
-    (src / "a.md").write_text(text, encoding="utf-8")
-    (src / "b copy.md").write_text(text.upper().replace("\n\n", "\n\n\n").replace(" ", "  "), encoding="utf-8")
-    (src / "c.md").write_text("# Different\n\n" + " ".join(words(6, 120)), encoding="utf-8")
+    (src / "a.md").write_text(text, encoding="utf-8", newline="\n")
+    (src / "b copy.md").write_text(text.upper().replace("\n\n", "\n\n\n").replace(" ", "  "), encoding="utf-8", newline="\n")
+    (src / "c.md").write_text("# Different\n\n" + " ".join(words(6, 120)), encoding="utf-8", newline="\n")
     ingest.run(args_for(src, repo))
     assert doc_ids(repo) == ["a", "c"]
     out = capsys.readouterr().out
@@ -665,7 +665,7 @@ def test_a_second_folder_appends_to_the_manifest_and_keeps_the_report_rows(repo,
 def test_a_manifest_without_a_final_newline_still_appends_cleanly(repo, src):
     copy_fixtures(src, "notes.md")
     corpus(repo).mkdir(parents=True)
-    (corpus(repo) / "manifest.tsv").write_text("docid\ttitle\tsource\tlicense\tnotes\nold\tOld\thttps://x\tmit\t", encoding="utf-8")
+    (corpus(repo) / "manifest.tsv").write_text("docid\ttitle\tsource\tlicense\tnotes\nold\tOld\thttps://x\tmit\t", encoding="utf-8", newline="\n")
     ingest.run(args_for(src, repo))
     rows = manifest_rows(repo)
     assert [r[0] for r in rows] == ["old", "notes"]
@@ -862,7 +862,7 @@ def test_rerunning_a_split_pdf_adds_no_parts(repo, src):
 
 def test_a_long_markdown_file_is_split_into_numbered_parts(repo, src):
     paragraphs = "\n\n".join(" ".join(words(4000 + i, 100)) for i in range(170))  # 17,000 words
-    (src / "book.md").write_text("# The book\n\n" + paragraphs, encoding="utf-8")
+    (src / "book.md").write_text("# The book\n\n" + paragraphs, encoding="utf-8", newline="\n")
     ingest.run(args_for(src, repo))
     ids = doc_ids(repo)
     assert len(ids) >= 3 and all(re.fullmatch(r"book__part0\d", i) for i in ids)
@@ -905,7 +905,7 @@ def test_source_template_fills_in_each_file_name():
 
 def test_report_rewrites_ingest_md_for_the_documents_left(repo, src, capsys):
     for i in range(3):
-        (src / f"note{i}.md").write_text(f"# Note {i}\n\n" + " ".join(words(30 + i, 80)), encoding="utf-8")
+        (src / f"note{i}.md").write_text(f"# Note {i}\n\n" + " ".join(words(30 + i, 80)), encoding="utf-8", newline="\n")
     assert ingest.run(args_for(src, repo)) == 0
     (corpus(repo) / "docs" / "note1.md").unlink()
     assert ingest.run(argparse.Namespace(src_dir=None, into="own", report=True, root=str(repo))) == 0
