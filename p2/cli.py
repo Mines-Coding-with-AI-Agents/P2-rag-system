@@ -1,0 +1,300 @@
+"""The `p2` command. `uv run p2 --help` lists the commands; `uv run p2 COMMAND --help` lists a command's options.
+
+    p2 run      write a run file (and a trace) for one system, or for every system with --all
+    p2 score    score the runs and answers, write results/results.json, rewrite the EVAL.md tables
+    p2 answer   answer the shared questions with Claude, citing chunks
+    p2 verify   print the quote check for one answers file
+    p2 ingest   turn a folder of PDF, HTML, Markdown or text files into your own corpus
+    p2 license  check the licenses of your own corpus and write LICENSES.md
+    p2 check    is everything well-formed and reproducible, and what is left to do
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import sys
+import time
+from pathlib import Path
+
+from p2 import config, metrics, paths, retrievers
+from p2 import corpus as corpus_mod
+from p2.runfile import read_qrels, read_queries, run_tag, write_run
+from p2.trace import Tracer
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="p2", description="P2: retrieval systems over two corpora, measured, plus cited answers.")
+    p.add_argument("--root", type=Path, help="the P2 repository (default: the nearest folder at or above this one with p2.toml)")
+    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+
+    run = sub.add_parser("run", help="write a run file for one system (or every system with --all)")
+    run.add_argument("--corpus", choices=paths.CORPORA, help="shared or own")
+    run.add_argument("--queries", help="practice or test (shared corpus), own (own corpus), or the path of a queries file")
+    run.add_argument("--system", help="a system in p2/retrievers/ (bm25, dense, hybrid, rerank, or one you added)")
+    run.add_argument("--k", type=int, help="documents per query (default: k in p2.toml; p2 check expects that value)")
+    run.add_argument("--label", help="name the run file after this label instead of the system")
+    run.add_argument("--ablation", action="store_true", help="own corpus only: write the run to runs/own/ablation/")
+    run.add_argument("--repeat", type=int, default=0, metavar="N", help="598E: run N times with fresh Claude replies, into .r1 to .rN files")
+    run.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
+    run.add_argument("--extra-corpus", type=Path, metavar="DIR", help="add the documents in DIR for this run only (never written to the repo)")
+    run.add_argument("--out", type=Path, help="write the run file here instead of runs/ (default for --extra-corpus or a queries file of your own: .cache/extra/)")
+    run.add_argument("--all", action="store_true", help="every system on every query set you have, and every ablation run again")
+    run.add_argument("--with-claude", action="store_true", help="with --all: also run the systems that call Claude")
+
+    sc = sub.add_parser("score", help="score runs and answers, write results/results.json, rewrite the EVAL.md tables")
+    sc.add_argument("--test-qrels", type=Path, help=argparse.SUPPRESS)  # the instructor's hidden test judgments
+    sc.add_argument("--out", type=Path, help=argparse.SUPPRESS)
+
+    an = sub.add_parser("answer", help="answer the shared questions with Claude, citing chunks")
+    an.add_argument("--corpus", choices=paths.CORPORA, default="shared", help="the corpus whose eval/<corpus>/questions.tsv to answer (default shared)")
+    an.add_argument("--system", required=True, help="the system that retrieves the chunks (it needs search_chunks)")
+    an.add_argument("--label", help="answers go to answers/<corpus>/<label>.json (default: the system name)")
+    an.add_argument("--only", help="only these question ids, for example a01,a09")
+    an.add_argument("--repeat", type=int, default=0, metavar="N", help="598E: answer N times with fresh Claude replies, into .r1 to .rN files")
+    an.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
+
+    ve = sub.add_parser("verify", help="print the quote check for one answers file")
+    ve.add_argument("file", nargs="?", help="an answers file (default: the newest one)")
+
+    ing = sub.add_parser("ingest", help="turn a folder of documents into your own corpus (needs `uv sync --group ingest`)")
+    ing.add_argument("src_dir", metavar="SRC_DIR", help="the folder of PDF, HTML, Markdown or text files")
+    ing.add_argument("--into", default="own", choices=["own"], help="the corpus to add to (own)")
+    ing.add_argument("--license", help="the license of these documents, from the vocabulary in the README")
+    ing.add_argument("--source", help="where they came from (a URL or a citation)")
+
+    lic = sub.add_parser("license", help="check the licenses of your own corpus and write LICENSES.md")
+    lic.add_argument("--online", action="store_true", help="also ask Crossref, arXiv and PubMed Central (needs the internet)")
+
+    ch = sub.add_parser("check", help="is everything well-formed and reproducible, and what is left to do")
+    ch.add_argument("--final", action="store_true", help="the submission bar: also fail on anything still to do")
+    return p
+
+
+# ---- p2 run ----
+
+
+def resolve_queries(root: Path, corpus: str, queries: str | None) -> tuple[str, Path]:
+    """(query set name, queries file) for --corpus and --queries."""
+    if queries is None:
+        queries = "own" if corpus == "own" else "practice"
+    if queries in paths.QUERY_SETS[corpus]:
+        return queries, paths.queries(root, corpus, queries)
+    if queries in ("practice", "test", "own"):
+        raise SystemExit(f"The {corpus} corpus goes with --queries {' or '.join(paths.QUERY_SETS[corpus])}, not {queries}.")
+    path = Path(queries)
+    if not path.is_file():
+        raise SystemExit(f"--queries {queries} is neither a query set name nor a file.")
+    return path.stem.split(".")[0], path
+
+
+def checked(name: str, hits, corpus: corpus_mod.Corpus, k: int) -> list[tuple[str, float]]:
+    """The hits of one search, after checking they keep the interface's promises."""
+    hits = [(str(d), float(s)) for d, s in hits]
+    ids = [d for d, _ in hits]
+    if len(hits) > k:
+        raise SystemExit(f"{name}.search returned {len(hits)} documents for k = {k}; return at most k.")
+    if len(set(ids)) != len(ids):
+        raise SystemExit(f"{name}.search returned a document twice; return each document once (corpus.doc_level keeps a document's best chunk).")
+    unknown = [d for d in ids if d not in corpus.docs]
+    if unknown:
+        raise SystemExit(f"{name}.search returned {unknown[0]}, which is not a document id of the corpus (a chunk id needs corpus.docid_of).")
+    return hits
+
+
+def run_one(cfg: config.Config, corpus: corpus_mod.Corpus, name: str, query_set: str, queries, out: Path, trace_path: Path, k: int, label: str) -> float | None:
+    """Run one system over a query set, write the run file and the trace; returns MRR@10 when qrels exist."""
+    started = time.perf_counter()  # building the index (encoding the chunks, say) is part of the time
+    system = retrievers.build(name, corpus, cfg)
+    model = getattr(system, "model", None)
+    results = {}
+    with Tracer(trace_path) as tracer:
+        for n, q in enumerate(queries, 1):
+            with tracer.span(f"retrieval {name}", "retrieval", name, q.qid, model=model) as span:
+                hits = checked(name, system.search(q.text, k), corpus, k)
+                span["p2.top_ids"] = [d for d, _ in hits]
+            results[q.qid] = hits
+            if retrievers.needs_claude(name):
+                print(f"  [{n}/{len(queries)}] {q.qid} {span['duration_ms'] / 1000:.1f} s", flush=True)
+    write_run(out, results, tag=name, k=k)
+    seconds = time.perf_counter() - started
+    root = cfg.root
+    line = f"{label}: wrote {paths.rel(root, out)} ({len(queries)} queries, {seconds:.1f} s)"
+    qrels_path = paths.qrels(root, corpus.name, query_set) if query_set in ("practice", "test", "own") else None
+    mrr = None
+    if qrels_path and qrels_path.is_file():
+        qrels, _ = read_qrels(qrels_path)
+        judged = metrics.judged_queries(qrels, [q.qid for q in queries])
+        if judged:
+            mrr = metrics.mean(metrics.evaluate(results, qrels, judged), "mrr@10")
+            line += f", MRR@10 {mrr:.3f} on {len(judged)} judged queries"
+    print(line, flush=True)
+    return mrr
+
+
+def cmd_run(args, cfg: config.Config) -> int:
+    root = cfg.root
+    if args.all:
+        return run_all(args, cfg)
+    if not args.corpus or not args.system:
+        print("p2 run needs --corpus and --system (or --all); for example: uv run p2 run --corpus shared --queries practice --system bm25")
+        return 2
+    if args.system not in retrievers.names():
+        print(f"There is no system called {args.system!r}; the systems are {', '.join(retrievers.names())}.")
+        return 2
+    label = args.label or args.system
+    if not paths.LABEL_RE.match(label):
+        print(f"The label {label!r} can use lower-case letters, digits, _ and - only; pick another.")
+        return 2
+    if args.ablation and args.corpus != "own":
+        print("--ablation goes with --corpus own: ablations are measured on your own corpus.")
+        return 2
+    query_set, qpath = resolve_queries(root, args.corpus, args.queries)
+    if not qpath.is_file():
+        print(f"{paths.rel(root, qpath)} is missing; write the queries first.")
+        return 1
+    queries, problems = read_queries(qpath, require_origin=args.corpus == "own" and qpath == paths.queries(root, "own", "own"))
+    if problems:
+        print(f"{paths.rel(root, qpath)}: {problems[0]}; fix the file first.")
+        return 1
+    if not queries:
+        print(f"{paths.rel(root, qpath)} has no queries yet.")
+        return 1
+    k = args.k or cfg.k
+    if args.repeat or args.fresh:
+        cfg = cfg.replace(cache_claude=False)
+    try:
+        corpus = corpus_mod.load(root, args.corpus, extra=args.extra_corpus)
+    except ValueError as error:
+        print(error)
+        return 1
+    if not corpus.docs:
+        print(f"corpora/{args.corpus}/docs/ has no documents yet.")
+        return 1
+    if retrievers.needs_claude(args.system):
+        print(f"{args.system} calls claude -p once per query: {len(queries) * max(1, args.repeat)} call(s) on {cfg.model}, fewer if replies are saved from before.")
+    for repeat in range(1, args.repeat + 1) if args.repeat else [None]:
+        if args.out:
+            out = args.out if repeat is None else args.out.with_name(f"{args.out.stem}.r{repeat}{args.out.suffix}")
+            trace_path = out.with_name(out.stem + ".trace.jsonl")
+        elif args.extra_corpus or qpath != paths.queries(root, args.corpus, query_set):
+            # A run on extra documents or on a queries file of your own is not part of the contract,
+            # so it goes to .cache/extra/ (ignored by git) instead of runs/.
+            out = root / ".cache" / "extra" / f"{label}.{query_set}{f'.r{repeat}' if repeat else ''}.trec"
+            trace_path = out.with_name(out.stem + ".trace.jsonl")
+        else:
+            out = paths.run_file(root, args.corpus, query_set, label, repeat, args.ablation)
+            trace_path = paths.trace_file(root, args.corpus, query_set, label, repeat, args.ablation)
+        try:
+            run_one(cfg, corpus, args.system, query_set, queries, out, trace_path, k, label + (f".r{repeat}" if repeat else ""))
+        except NotImplementedError as error:
+            print(error)
+            return 1
+    return 0
+
+
+def run_all(args, cfg: config.Config) -> int:
+    root = cfg.root
+    jobs = []  # (corpus, query set, system, label, ablation)
+    for corpus in paths.CORPORA:
+        if not corpus_mod.doc_files(paths.docs_dir(root, corpus)):
+            print(f"Skipping the {corpus} corpus: it has no documents yet.")
+            continue
+        for query_set in paths.QUERY_SETS[corpus]:
+            qpath = paths.queries(root, corpus, query_set)
+            if not qpath.is_file() or not read_queries(qpath)[0]:
+                print(f"Skipping {paths.rel(root, qpath)}: it has no queries yet.")
+                continue
+            for name in retrievers.names():
+                jobs.append((corpus, query_set, name, name, False))
+    for path in sorted((root / "runs" / "own" / "ablation").glob("*.trec")):
+        tag = run_tag(path)
+        if tag in retrievers.names():
+            jobs.append(("own", "own", tag, path.stem, True))
+    status = 0
+    loaded: dict[str, corpus_mod.Corpus] = {}
+    for corpus_name, query_set, name, label, ablation in jobs:
+        if retrievers.needs_claude(name) and not args.with_claude:
+            print(f"{label}: skipped, it calls Claude (add --with-claude to run it too).")
+            continue
+        corpus = loaded.setdefault(corpus_name, corpus_mod.load(root, corpus_name))
+        queries, problems = read_queries(paths.queries(root, corpus_name, query_set), require_origin=corpus_name == "own")
+        if problems:
+            print(f"{paths.rel(root, paths.queries(root, corpus_name, query_set))}: {problems[0]}; fix the file first.")
+            status = 1
+            continue
+        out = paths.run_file(root, corpus_name, query_set, label, None, ablation)
+        trace_path = paths.trace_file(root, corpus_name, query_set, label, None, ablation)
+        try:
+            run_one(cfg, corpus, name, query_set, queries, out, trace_path, args.k or cfg.k, f"{'ablation/' if ablation else ''}{label} on {corpus_name} {query_set}")
+        except NotImplementedError:
+            print(f"{label}: not built yet (p2/retrievers/{name}.py still raises NotImplementedError).")
+    return status
+
+
+# ---- the other commands ----
+
+
+def lazy(module_name: str, command: str, hint: str):
+    """Import a module that another part of the template provides, or say it is not there yet."""
+    try:
+        return importlib.import_module(f"p2.{module_name}")
+    except ModuleNotFoundError as error:
+        if error.name == f"p2.{module_name}":
+            print(f"p2 {command} is not built yet in this copy of the template.")
+            return None
+        print(f"p2 {command} needs the {error.name} package; {hint}")
+        return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # a Windows console cannot print every character
+        except (AttributeError, ValueError):
+            pass
+    args = parser().parse_args(argv)
+    if not args.command:
+        parser().print_help()
+        return 0
+    root = args.root.resolve() if args.root else None
+    if args.command == "check":
+        from p2 import check
+
+        try:
+            root = root or config.find_root()
+        except config.ConfigError as error:
+            print(error)
+            return 1
+        return check.run(args, root)
+    try:
+        cfg = config.load(root)
+    except config.ConfigError as error:
+        print(error)
+        return 1
+    args.root = cfg.root
+    if args.command == "run":
+        return cmd_run(args, cfg)
+    if args.command == "score":
+        from p2 import score
+
+        return score.run(args, cfg)
+    if args.command == "answer":
+        from p2 import answer
+
+        return answer.run(args, cfg)
+    if args.command == "verify":
+        from p2 import verify
+
+        return verify.run(args, cfg)
+    if args.command == "ingest":
+        module = lazy("ingest", "ingest", "install the converters with `uv sync --group ingest` and run the command again.")
+        return 1 if module is None else int(module.run(args) or 0)
+    if args.command == "license":
+        module = lazy("license", "license", "run `uv sync` and try again.")
+        return 1 if module is None else int(module.run(args) or 0)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

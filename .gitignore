@@ -1,0 +1,24 @@
+# Python and uv
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Model downloads, cached vectors and cached Claude replies (rebuilt on demand)
+.cache/
+
+# Retrieval traces change on every run, so git ignores them.
+# Traces of answers and of reranked runs record what the Claude calls cost, so they are committed.
+traces/*.jsonl
+!traces/answers-*.jsonl
+!traces/*rerank*.jsonl
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

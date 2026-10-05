@@ -1,0 +1,49 @@
+# p2-check: the check GitHub runs on every push and pull request of your P2 repo.
+# It runs `uv run p2 check`, the same command you run on your machine: is everything you committed
+# well-formed and reproducible? Work you have not done yet is a TODO line and keeps the run green;
+# only a FAIL line turns it red, and each FAIL line says what to do next.
+# It never calls Claude: runs of a system with NEEDS_CLAUDE = True are checked, not regenerated.
+# This file belongs to the course, so please leave it as it is.
+
+name: p2-check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push replaces a check that is still running on the same branch.
+  group: p2-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      # The embedding models (about 200 MB) and the chunk vectors, so a later run does not download
+      # and encode everything again. Vectors are stored per chunk text, so a cache from an earlier
+      # corpus or setting (the restore-keys fallback) still saves the work for every unchanged chunk.
+      - name: Restore the model and vector cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/huggingface
+            .cache/vectors
+          key: p2-models-vectors-${{ runner.os }}-${{ hashFiles('uv.lock', 'p2.toml', 'corpora/*/manifest.tsv') }}
+          restore-keys: |
+            p2-models-vectors-${{ runner.os }}-
+
+      - name: Install the locked packages
+        run: uv sync --frozen
+
+      - name: Run p2 check
+        run: uv run --frozen p2 check
