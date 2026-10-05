@@ -374,9 +374,11 @@ The three reranker repeats and the three answer sets add about 130 Claude calls 
 You commit it before the first judgment appears in `eval/own/qrels.txt`, and `p2 check --final` reads `git log` to confirm the order.
 Afterwards you report the outcome against it.
 A well-powered null scores as well as a confirmation, so you have no reason to hedge the claim.
-For example, a 0.10 MRR gap at a per-query standard deviation of 0.3 needs about 71 queries, against the 30 that detect only about 0.15.
-The spreads you will measure in stage 1 are mostly larger than 0.3: on the practice queries they run from about 0.31 (`hybrid` against `bm25`) to about 0.66 (`dense` against `bm25`), and `rerank` against `hybrid` is about 0.39, where a 0.10 gap needs about 120 queries, 0.15 about 55 and 0.20 about 31.
-So choose the smallest effect that matters together with a gold set you can judge in the time you have, and say in `PREREG.md` how you traded the two off.
+Pre-register a smallest effect of at least 0.15 in MRR@10 or nDCG@10, unless you argue for a larger one: a smaller gap is rarely worth a reranker's cost, and detecting it takes more queries than one project can judge.
+The gold-set size then follows from the per-query spread you measure in stage 1.
+For `rerank` against `hybrid` that spread is about 0.39 on the practice queries, so a gap of 0.15 needs about 55 queries, against the 30 that 498E uses.
+Spreads differ by pair, from about 0.31 (`hybrid` against `bm25`) to about 0.66 (`dense` against `bm25`), and at 0.66 even a gap of 0.15 needs about 150 queries, so compare a pair whose spread you can afford, or take a larger gap and say why.
+Say in `PREREG.md` how you chose the pair, the gap and the gold-set size.
 
 ---
 

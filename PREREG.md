@@ -32,7 +32,8 @@ TODO: your hypothesis.
 
 Name one metric, MRR@10 or nDCG@10, and choose it now so you cannot pick the better one afterwards.
 Then say how large a difference between the two systems would matter to a person using the search, and why that size.
-A difference of 0.02 is usually not worth a reranker's cost in time and tokens; a difference of 0.10 might be.
+A difference of 0.02 is usually not worth a reranker's cost in time and tokens.
+In this course, choose a Δ of at least 0.15 unless you argue for a larger one, because a smaller gap takes more queries than one project can judge.
 Call your number Δ (delta).
 
 TODO: your metric and your Δ, with the reason.
@@ -56,6 +57,7 @@ At sd 0.3 and Δ 0.10 the formula gives about 71 queries, and with the t distrib
 At sd 0.3, a gold set of 30 queries can only detect a difference of about 0.15, which is why 30 queries cannot support a claim about a gap of 0.10.
 The spreads you will measure on the shared practice queries are mostly larger than 0.3: from about 0.31 for `hybrid` against `bm25` to about 0.66 for `dense` against `bm25`.
 For `rerank` against `hybrid` the sd is about 0.39, so a Δ of 0.10 needs about 120 queries, 0.15 about 55, and 0.20 about 31.
+So the course's Δ of 0.15 means about 55 queries for that pair; at an sd of 0.66 it would mean about 150, so compare a pair whose spread you can afford.
 Choose Δ and the size of your gold set together: the smallest effect that matters to a user, and a number of queries you can write and judge in the time you have.
 If the two do not meet, say which one you gave ground on and why.
 
