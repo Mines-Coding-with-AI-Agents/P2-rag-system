@@ -13,25 +13,43 @@ The names:
     shared-practice-pairs      every pair of systems: mean difference, paired 95% interval, minimum
                                detectable difference, reading (add -recall, -mrr or -ndcg for one metric)
     own, own-classes, own-pairs   the same on your own corpus and gold set
-    own-origins                the own-corpus scores for the queries you wrote (hand) and the ones a model drafted (claude)
+    own-origins                the own-corpus scores for the queries you wrote (hand) and the ones a model
+                               drafted (claude), hand minus claude with an unpaired 95% interval, whether
+                               bm25's lead over dense differs between the two (stretch option 6), and the
+                               content-word overlap of each group's queries with their relevant documents
     own-ablation               each ablation run against each of the other systems on your corpus
+    own-ablation-queries       each ablation against the system it varies: the queries it helped and hurt
     answers                    each answers file: verified share, not_found share, declined share
     repeats                    598E: the repeated reranker runs and answers files, with their spread
+    stretch-judge              stretch option 2: Claude's verdicts on claims against yours (p2 judge)
+    stretch-cost               stretch option 3: the Claude calls, tokens and seconds in every trace, and
+                               what a cheaper system or answers file saves against what it loses
+    stretch-agent              stretch option 5: a stretch run (the grep agent) against the four systems
+                               on the same queries (add -recall, -mrr or -ndcg to stretch-cost or
+                               stretch-agent for another metric than MRR@10)
 p2 check recomputes every one of these tables, so edit your prose around them, never inside.
+
+How own-ablation-queries finds the system an ablation varies (its base): the file of the ablation's
+system may say so in one line, BASE = "dense"; without that line, the base is the longest part of the
+system's name before an underscore that names a system with a run on your own corpus (bm25_lab varies
+bm25, dense_potion varies dense). p2 reads that line without running the file.
 """
 
 from __future__ import annotations
 
+import ast
+import copy
 import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from p2 import metrics, paths, stats, verify
+from p2 import metrics, paths, stats, stretch, textproc, verify
 from p2 import corpus as corpus_mod
+from p2 import retrievers as retriever_pkg
 from p2.retrievers import CANONICAL
-from p2.runfile import read_qrels, read_queries, read_run
+from p2.runfile import read_qrels, read_queries, read_run, run_tag
 
 METRIC_NAMES = {"recall@10": "Recall@10", "mrr@10": "MRR@10", "ndcg@10": "nDCG@10"}
 METRIC_SLUGS = {"recall": "recall@10", "mrr": "mrr@10", "ndcg": "ndcg@10"}
@@ -39,7 +57,15 @@ SETS = {"shared-practice": ("shared", "practice"), "shared-test": ("shared", "te
 VIEWS = ("classes", "origins", "pairs", "ablation")
 OWN_ONLY_VIEWS = ("origins", "ablation")
 # The tables EVAL.md must keep (a name with a metric added, such as shared-practice-pairs-mrr, counts).
-REQUIRED_BLOCKS = ("shared-practice", "shared-practice-classes", "shared-practice-pairs", "answers", "own", "own-classes", "own-origins", "own-pairs", "own-ablation")
+REQUIRED_BLOCKS = (
+    "shared-practice", "shared-practice-classes", "shared-practice-pairs", "answers", "own", "own-classes", "own-origins", "own-pairs",
+    "own-ablation", "own-ablation-queries", "stretch-judge", "stretch-cost", "stretch-agent",
+)  # fmt: skip
+# Blocks that take a metric after their name (stretch-cost-ndcg), besides the set views.
+METRIC_BLOCKS = ("stretch-cost", "stretch-agent")
+# The part of the stretch-cost table that comes from traces/retrieval/, which git ignores: it starts
+# with this sentence, and p2 check does not compare it (it would differ on every machine).
+LOCAL_HEADING = "Systems that do not call Claude, from traces/retrieval/"
 RIDER_BLOCKS = ("repeats",)
 BLOCK_RE = re.compile(r"<!-- p2:begin (?P<name>[A-Za-z0-9_.-]+) -->(?P<body>.*?)<!-- p2:end (?P=name) -->", re.S)
 BEGIN_RE = re.compile(r"<!-- p2:begin ([A-Za-z0-9_.-]+) -->")
@@ -56,11 +82,12 @@ class RunRef:
     path: Path
     repeat: int | None = None
     ablation: bool = False
+    stretch: bool = False
 
     @property
     def system(self) -> str:
-        """The name the tables show: the file's name, with ablation/ in front for an ablation."""
-        return f"ablation/{self.name}" if self.ablation else self.name
+        """The name the tables show: the file's name, with ablation/ or stretch/ in front for those runs."""
+        return f"ablation/{self.name}" if self.ablation else f"stretch/{self.name}" if self.stretch else self.name
 
     @property
     def set_key(self) -> str:
@@ -89,6 +116,8 @@ def discover(root: Path) -> tuple[list[RunRef], list[Path]]:
                 ref = RunRef("own", "own", parts[0], path, repeat)
             elif where[:-1] == ("own", "ablation") and len(parts) == 1 and repeat is None:
                 ref = RunRef("own", "own", parts[0], path, None, ablation=True)
+            elif where[:-1] == ("own", "stretch") and len(parts) == 1 and repeat is None:
+                ref = RunRef("own", "own", parts[0], path, None, stretch=True)
         if ref is None:
             odd.append(path)
         else:
@@ -133,7 +162,7 @@ def score_set(root: Path, corpus: str, query_set: str, refs: list[RunRef], qrels
     queries, _ = read_queries(qpath)
     qrels, _ = read_qrels(qrels_path)
     judged = metrics.judged_queries(qrels, [q.qid for q in queries])
-    mine = [r for r in refs if r.corpus == corpus and r.query_set == query_set]
+    mine = [r for r in refs if r.corpus == corpus and r.query_set == query_set and not r.stretch]
     if not judged or not mine:
         return None, notes
     classes = {q.qid: q.cls for q in queries}
@@ -174,6 +203,11 @@ def score_set(root: Path, corpus: str, query_set: str, refs: list[RunRef], qrels
             }
     names = list(result["systems"])
     result["pairs"] = _pairs(names, per_query, judged)
+    if origin_names:
+        result["origins"] = origin_analysis(root, corpus, result, per_query, judged, origins, qrels, queries)
+    ablations = {r.system: r for r in mine if r.ablation and r.repeat is None and r.system in per_query}
+    if ablations:
+        result["ablation_queries"] = {name: ablation_queries(ref, result, per_query, judged, classes, origins) for name, ref in ablations.items()}
     repeats: dict[str, dict] = {}
     for ref in sorted((r for r in mine if r.repeat is not None), key=lambda r: (system_order(r.system), r.repeat)):
         try:
@@ -201,12 +235,127 @@ def score_set(root: Path, corpus: str, query_set: str, refs: list[RunRef], qrels
     return result, notes
 
 
+def content_words(text: str) -> set[str]:
+    """The distinct content words of a text: the 12 lab's tokens ([a-z0-9]+, lower-cased, stopwords dropped)."""
+    return set(textproc.tokens_lab(text))
+
+
+def origin_analysis(root: Path, corpus: str, result: dict, per_query: dict, judged: list[str], origins: dict, qrels: dict, queries) -> dict:
+    """Hand against claude queries (stretch option 6): each system's hand minus claude with an unpaired
+    interval, the interaction (bm25 minus dense on claude queries) minus (the same on hand queries), and
+    the mean content-word overlap of each group's queries with their best relevant document."""
+    groups = {o: [q for q in judged if origins[q] == o] for o in ("hand", "claude")}
+    both = all(groups.values())
+    out: dict = {"n": {o: len(v) for o, v in groups.items()}, "interaction": None, "overlap": {}}
+    if both:
+        for name, pq in per_query.items():
+            diff = {}
+            for m in metrics.METRICS:
+                boot = stats.unpaired_bootstrap([pq[q][m] for q in groups["hand"]], [pq[q][m] for q in groups["claude"]])
+                diff[m] = {"mean_diff": r6(boot["mean_diff"]), "ci95": [r6(v) for v in boot["ci95"]], "reading": stats.reading(boot["ci95"], "hand", "claude")}
+            result["systems"][name]["origin_diff"] = diff
+        if "bm25" in per_query and "dense" in per_query:
+            inter = {"a": "bm25", "b": "dense"}
+            for m in metrics.METRICS:
+                lead = {o: [per_query["bm25"][q][m] - per_query["dense"][q][m] for q in groups[o]] for o in groups}
+                boot = stats.unpaired_bootstrap(lead["claude"], lead["hand"])
+                inter[m] = {
+                    "mean_diff": r6(boot["mean_diff"]), "ci95": [r6(v) for v in boot["ci95"]],
+                    "lead_claude": r6(sum(lead["claude"]) / len(lead["claude"])), "lead_hand": r6(sum(lead["hand"]) / len(lead["hand"])),
+                    "reading": interaction_reading(boot["ci95"]),
+                }  # fmt: skip
+            out["interaction"] = inter
+    docs = corpus_mod.load(root, corpus).docs
+    words: dict[str, set[str]] = {}
+    texts = {q.qid: q.text for q in queries}
+    for o, qids in groups.items():
+        shares = []
+        for q in qids:
+            mine = content_words(texts.get(q, ""))
+            relevant = [d for d, r in qrels.get(q, {}).items() if r > 0 and d in docs]
+            if not mine or not relevant:
+                continue
+            for d in relevant:
+                if d not in words:
+                    words[d] = content_words(docs[d].text)
+            shares.append(max(len(mine & words[d]) / len(mine) for d in relevant))
+        if shares:
+            out["overlap"][o] = {"n": len(shares), "mean": r6(sum(shares) / len(shares))}
+    return out
+
+
+def interaction_reading(ci95) -> str:
+    lo, hi = ci95
+    if lo > 0:
+        return "bm25 gains more on claude queries"
+    if hi < 0:
+        return "bm25 gains more on hand queries"
+    return "not distinguishable"
+
+
+def base_constant(path: Path) -> str | None:
+    """The string in a top-level `BASE = "..."` line of a Python file, read without running the file."""
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8-sig"))  # a byte order mark from a Windows editor is not code
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):  # BASE: str = "dense"
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "BASE" for t in targets):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                return node.value.value
+    return None
+
+
+def ablation_base(system: str, others: list[str]) -> tuple[str | None, str]:
+    """(the system an ablation's system varies, how that was decided); see the module docstring."""
+    module = Path(retriever_pkg.__file__).parent / f"{system}.py"
+    declared = base_constant(module)
+    if declared is not None:
+        if declared in others:
+            return declared, f'BASE = "{declared}" in p2/retrievers/{system}.py'
+        return None, f'p2/retrievers/{system}.py says BASE = "{declared}", which has no run on your own corpus'
+    parts = system.split("_")
+    for i in range(len(parts) - 1, 0, -1):
+        guess = "_".join(parts[:i])
+        if guess in others:
+            return guess, f"the name {system} starts with {guess}_"
+    return None, f'no base found: add a line BASE = "name of the system it varies" to p2/retrievers/{system}.py'
+
+
+def ablation_queries(ref: RunRef, result: dict, per_query: dict, judged: list[str], classes: dict, origins: dict) -> dict:
+    """The queries an ablation helped and hurt against its base, by reciprocal rank (MRR@10 per query)."""
+    system = run_tag(ref.path) or ref.name
+    others = [n for n in result["systems"] if not n.startswith("ablation/")]
+    base, rule = ablation_base(system, others)
+    entry: dict = {"system": system, "base": base, "rule": rule, "helped": [], "hurt": [], "unchanged": 0}
+    if base is None:
+        return entry
+    for q in judged:
+        before, after = per_query[base][q]["mrr@10"], per_query[ref.system][q]["mrr@10"]
+        row = {"qid": q, "class": classes[q], "origin": origins.get(q) or "", "base_rr": r6(before), "rr": r6(after), "change": r6(after - before)}
+        if after > before:
+            entry["helped"].append(row)
+        elif after < before:
+            entry["hurt"].append(row)
+        else:
+            entry["unchanged"] += 1
+    entry["helped"].sort(key=lambda r: (-r["change"], r["qid"]))
+    entry["hurt"].sort(key=lambda r: (r["change"], r["qid"]))
+    return entry
+
+
 def score_answers(root: Path, cfg) -> tuple[dict, dict, list[str]]:
     """(answers results, answer repeats, notes) for every answers file under answers/."""
     results: dict[str, dict] = {}
     notes: list[str] = []
     chunk_cache: dict[tuple, dict[str, str]] = {}
-    for path in sorted((root / "answers").glob("*/*.json")):
+    for path in paths.answers_files(root):
         corpus = path.parent.name
         try:
             data = verify.load_answers(path)
@@ -226,6 +375,7 @@ def score_answers(root: Path, cfg) -> tuple[dict, dict, list[str]]:
             "not_found_in_share": r6(t["not_found_in"] / t["n_in"]) if t["n_in"] else None,
             "declined_out_share": r6(t["declined_out"] / t["n_out"]) if t["n_out"] else None,
             "declined_out_wilson95": [r6(v) for v in stats.wilson(t["declined_out"], t["n_out"])],
+            "passed": dict(totals.passed),
         }  # fmt: skip
         results[f"{corpus}/{path.stem}"] = entry
     # The repeats of one label answer the same questions, so they are not independent trials: each
@@ -261,16 +411,37 @@ def compute(root: Path, cfg, test_qrels: Path | None = None) -> tuple[dict, list
             sets[f"{corpus}/{query_set}"] = result
     answers, answer_repeats, answer_notes = score_answers(root, cfg)
     notes += answer_notes
+    judged, judge_notes = stretch.judge(root)
+    agent, agent_notes = stretch.agent(root, [(r.name, r.path) for r in refs if r.stretch], sets.get("own/own"))
+    notes += judge_notes + agent_notes
     results = {
         "written_by": "uv run p2 score",
-        "note": "p2 check recomputes this file from the committed runs, qrels and answers; do not edit it by hand.",
+        "note": "p2 check recomputes this file from the committed runs, qrels, answers and traces; do not edit it by hand.",
         "metrics": list(metrics.METRICS),
         "sets": sets,
         "answers": answers,
+        "stretch": {"judge": judged, "cost": stretch.cost(root, sets, answers), "agent": agent},
     }
     if answer_repeats:
         results["answer_repeats"] = answer_repeats
     return results, notes
+
+
+def comparable(results: dict) -> dict:
+    """A results structure without the part p2 check cannot recompute in CI: the seconds of the systems
+    that do not call Claude, from traces/retrieval/, which git ignores."""
+    out = copy.deepcopy(results) if isinstance(results, dict) else results
+    cost = out.get("stretch", {}).get("cost") if isinstance(out, dict) and isinstance(out.get("stretch"), dict) else None
+    if isinstance(cost, dict):
+        cost.pop("local", None)
+    return out
+
+
+def checked_part(name: str, body: str) -> str:
+    """The part of an EVAL.md block that p2 check compares (all of it, except the local part of stretch-cost)."""
+    if name == "stretch-cost" or name.startswith("stretch-cost-"):
+        return body.split(LOCAL_HEADING, 1)[0]
+    return body
 
 
 # ---- rendering the EVAL.md tables ----
@@ -353,6 +524,180 @@ def render_pairs(pairs: list[dict], slug: str | None) -> str:
     return table(["Comparison", "Metric", "Mean difference", "95% interval", "MDD", "Reading"], rows, right=2, text_last=True) + "\n\n" + note
 
 
+ABLATION_PLACEHOLDER = "_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._"
+JUDGE_PLACEHOLDER = (
+    "_No judged answers yet (stretch option 2): `uv run p2 judge answers/shared/LABEL.json` writes them, your own verdicts go in"
+    " answers/shared/LABEL.calibration.tsv, and then `uv run p2 score` fills this table._"
+)
+COST_PLACEHOLDER = "_No Claude traces yet: a run of a system that calls Claude, `p2 answer` and `p2 judge` write them in traces/, and then `uv run p2 score` fills this table._"
+AGENT_PLACEHOLDER = (
+    "_No stretch runs yet (stretch option 5): `uv run p2 run --corpus own --queries eval/own/agent.queries.tsv --system agent --stretch`"
+    " writes one to runs/own/stretch/, then `uv run p2 score` fills this table._"
+)
+SET_LABELS = {"shared/practice": "shared practice", "own/own": "own"}
+MIN_GROUP = 20
+
+
+def render_origins(s: dict, slug: str | None) -> str:
+    first = next(iter(s["systems"].values()))
+    if not first.get("by_origin"):
+        return "_Your queries have no origin column yet, so there is nothing to split._"
+    wanted = _metrics_for(slug)
+    groups = list(first["by_origin"])
+    o = s.get("origins") or {}
+    both = len(groups) == 2 and all(v.get("origin_diff") for v in s["systems"].values())
+    header = ["System", "Metric"] + [f"{g} (n={first['by_origin'][g]['n']})" for g in groups]
+    if both:
+        header += ["hand minus claude", "95% interval", "Reading"]
+    rows = []
+    for name, v in s["systems"].items():
+        for m in wanted:
+            row = [name, METRIC_NAMES[m]] + [f3(v["by_origin"][g][m]) for g in groups]
+            if both:
+                d = v["origin_diff"][m]
+                row += [signed(d["mean_diff"]), interval(d["ci95"]), d["reading"]]
+            rows.append(row)
+    parts = [table(header, rows, right=2, text_last=both)]
+    if both:
+        parts.append("The hand and claude queries are different queries, so the interval of hand minus claude comes from resampling the queries within each group (10,000 times), not from pairing them.")
+    else:
+        parts.append(f"All your judged queries have the origin {groups[0]}, so there is nothing to compare.")
+    inter = o.get("interaction")
+    if inter:
+        irows = [[METRIC_NAMES[m], signed(inter[m]["lead_claude"]), signed(inter[m]["lead_hand"]), signed(inter[m]["mean_diff"]), interval(inter[m]["ci95"]), inter[m]["reading"]] for m in wanted]
+        parts.append("Do model-written queries favor keyword search? bm25's lead over dense (bm25 minus dense, per query) on the claude queries and on the hand queries, and claude minus hand:")
+        parts.append(table(["Metric", "Lead on claude", "Lead on hand", "Claude minus hand", "95% interval", "Reading"], irows, right=1, text_last=True))
+    elif both:
+        parts.append("Whether bm25's lead over dense differs between the two groups needs runs of both bm25 and dense on your own corpus.")
+    overlap = o.get("overlap") or {}
+    if overlap:
+        bits = [f"{g} {overlap[g]['mean']:.2f} ({overlap[g]['n']} queries)" for g in ("hand", "claude") if g in overlap]
+        parts.append("Mean content-word overlap, the share of a query's content words found in its best relevant document: " + ", ".join(bits) + ".")
+    n = o.get("n") or {}
+    if both and min(n.values()) < MIN_GROUP:
+        parts.append(f"Stretch option 6 asks for at least {MIN_GROUP} judged queries of each origin; here there are {n['hand']} hand and {n['claude']} claude.")
+    return "\n\n".join(parts)
+
+
+def render_ablation_queries(s: dict | None) -> str:
+    entries = (s or {}).get("ablation_queries") or {}
+    if not entries:
+        return ABLATION_PLACEHOLDER
+    parts = []
+    for name, e in entries.items():
+        if e["base"] is None:
+            parts.append(f"{name}: {e['rule']}.")
+            continue
+        head = f"{name} against {e['base']} ({e['rule']}): it helped {len(e['helped'])} queries, hurt {len(e['hurt'])} and left {e['unchanged']} unchanged."
+        rows = [[r["qid"], r["class"], r["origin"] or "-", f3(r["base_rr"]), f3(r["rr"]), signed(r["change"]), effect] for effect in ("helped", "hurt") for r in e[effect]]
+        if rows:
+            head += "\n\n" + table(["Query", "Class", "Origin", f"{e['base']} RR", f"{name} RR", "Change", "Effect"], rows, right=3, text_last=True)
+        parts.append(head)
+    parts.append("RR is the reciprocal rank of the first relevant document in the top 10 (0 when none is there), the per-query value behind MRR@10; the queries at the top of each list are the ones to read.")
+    return "\n\n".join(parts)
+
+
+def render_stretch_judge(results: dict) -> str:
+    j = (results.get("stretch") or {}).get("judge") or {}
+    files = j.get("files") or {}
+    if not files:
+        return JUDGE_PLACEHOLDER
+    rows = []
+    for key, e in files.items():
+        compared = e["compared"]
+        rows.append([
+            key.split("/", 1)[1], str(e["claims_judged"]), str(e["judge_counts"]["supported"]), str(e["judge_counts"]["partly"]), str(e["judge_counts"]["not"]),
+            str(e["labeled"]), str(compared), share(e["agree"], compared) if compared else "-", wilson_text(e["agreement_wilson95"]) if compared else "-",
+        ])  # fmt: skip
+    pooled = j.get("pooled")
+    if pooled and len(files) > 1:
+        rows.append(["all files", "", "", "", "", "", str(pooled["compared"]), share(pooled["agree"], pooled["compared"]), wilson_text(pooled["agreement_wilson95"])])
+    header = ["Answers file", "Judged by Claude", "supported", "partly", "not", "Labeled by you", "Labeled by both", "Agree", "95% interval"]
+    parts = [table(header, rows)]
+    if not pooled:
+        parts.append(f"Nothing to compare yet: label at least {MIN_GROUP} claims in a calibration file beside a judged file.")
+        return "\n\n".join(parts)
+    verdicts = list(pooled["matrix"])
+    mrows = [[v] + [str(pooled["matrix"][v][w]) for w in verdicts] + [str(sum(pooled["matrix"][v].values()))] for v in verdicts]
+    mrows.append(["total"] + [str(sum(pooled["matrix"][v][w] for v in verdicts)) for w in verdicts] + [str(pooled["compared"])])
+    parts.append(f"Claude's verdict (rows) against yours (columns), over the {pooled['compared']} claims you both labeled:")
+    parts.append(table(["Claude", *(f"you: {w}" for w in verdicts), "Total"], mrows))
+    note = "Agree is the share of the claims you both labeled where Claude's verdict is yours, with a Wilson 95% interval."
+    if pooled["compared"] < MIN_GROUP:
+        note += f" That is {pooled['compared']} claims, fewer than the {MIN_GROUP} the stretch asks for."
+    parts.append(note)
+    return "\n\n".join(parts)
+
+
+def render_stretch_cost(results: dict, slug: str | None) -> str:
+    c = (results.get("stretch") or {}).get("cost") or {}
+    metric = METRIC_SLUGS[slug] if slug else "mrr@10"
+    parts = []
+    traces = c.get("traces") or []
+    if traces:
+        rows = []
+        for t in traces:
+            n = t["spans"] or 1
+            rows.append([
+                t["file"], t["system"] or "-", str(t["spans"]), str(t["calls"]), str(t["saved"]), f"{t['input_tokens']:,}", f"{t['output_tokens']:,}", f"{t['seconds']:.1f}",
+                f"{t['input_tokens'] / n:,.0f}", f"{t['output_tokens'] / n:,.0f}", f"{t['seconds'] / n:.1f}",
+            ])  # fmt: skip
+        header = ["Trace", "System", "Spans", "Claude calls", "Saved", "Input tokens", "Output tokens", "Seconds", "Input per span", "Output per span", "Seconds per span"]
+        parts.append("Every trace in traces/ that records a Claude call:\n\n" + table(header, rows, right=2))
+        parts.append(
+            "A span is one query of a run, one question of an answers file, or one claim of a judged file."
+            " A saved reply costs nothing now, so it counts the tokens and the seconds of the call that made it."
+        )
+    else:
+        parts.append(COST_PLACEHOLDER)
+    pairs = [p for p in c.get("run_pairs") or [] if p["metric"] == metric]
+    if pairs:
+        rows = [
+            [f"{SET_LABELS.get(p['set'], p['set'])}: {p['cheaper']} minus {p['dearer']}", str(p["n"]), signed(p["mean_diff"]), interval(p["ci95"]),
+             f"{p['input_saved_per_query']:,.0f}", f"{p['seconds_saved_per_query']:.1f}", p["reading"]]
+            for p in pairs
+        ]  # fmt: skip
+        header = ["Cheaper minus dearer", "Queries", f"{METRIC_NAMES[metric]} difference", "95% interval", "Input tokens saved per query", "Seconds saved per query", "Reading"]
+        parts.append("Every pair of systems on the same queries where at least one calls Claude, the one with fewer Claude input tokens per query first:\n\n" + table(header, rows, text_last=True))
+        parts.append("The difference is the cheaper system's score minus the dearer one's, with its paired interval; the savings count Claude calls only, so a system that makes none saves all of the other's.")
+    answer_pairs = c.get("answers_pairs") or []
+    if answer_pairs:
+        rows = [
+            [f"{p['corpus']}: {p['cheaper']} minus {p['dearer']}", str(p["n"]), signed(p["mean_diff"]), interval(p["ci95"]),
+             f"{p['input_saved_per_question']:,.0f}", f"{p['seconds_saved_per_question']:.1f}", p["reading"]]
+            for p in answer_pairs
+        ]  # fmt: skip
+        header = ["Cheaper minus dearer", "Questions", "Passing share difference", "95% interval", "Input tokens saved per question", "Seconds saved per question", "Reading"]
+        parts.append("Every two answers files on the same questions, the one with fewer input tokens per question first:\n\n" + table(header, rows, text_last=True))
+        parts.append("A question passes when its `p2 verify` line is a PASS: every quote is in a chunk that was retrieved, and the question is declined exactly when it should be.")
+    local = c.get("local") or []
+    if local:
+        rows = [[t["file"], t["system"] or "-", str(t["spans"]), f"{t['seconds']:.2f}", f"{1000 * t['seconds'] / (t['spans'] or 1):.1f}"] for t in local]
+        parts.append(
+            f"{LOCAL_HEADING} on the machine that last ran `p2 score` (git ignores that folder, so `p2 check` does not compare this part):\n\n"
+            + table(["Trace", "System", "Queries", "Seconds", "Milliseconds per query"], rows, right=2)
+        )
+    return "\n\n".join(parts)
+
+
+def render_stretch_agent(results: dict, slug: str | None) -> str:
+    a = (results.get("stretch") or {}).get("agent") or {}
+    if not a:
+        return AGENT_PLACEHOLDER
+    parts = []
+    for name, e in a.items():
+        head = f"{name} on {e['n_queries']} of your own queries, {len(e['judged'])} of them with a relevant document"
+        head += f" ({', '.join(e['judged'])})." if e["judged"] else "."
+        rows = [
+            [sys_name] + [f3(v["mean"][m]) for m in metrics.METRICS] + ([f"{v['input_tokens']:,.0f}", f"{v['seconds']:.1f}"] if v["claude"] else ["-", "-"])
+            for sys_name, v in e["systems"].items()
+        ]
+        parts.append(head + "\n\n" + table(["System"] + [METRIC_NAMES[m] for m in metrics.METRICS] + ["Claude input tokens per query", "Claude seconds per query"], rows))
+        parts.append(render_pairs(e["pairs"], slug or "mrr"))
+    parts.append("Systems that make no Claude calls show -; their own seconds per query are in the stretch-cost table on your machine.")
+    return "\n\n".join(parts)
+
+
 def render_answers(results: dict) -> str:
     rows = []
     for key, a in results["answers"].items():
@@ -406,6 +751,14 @@ def render(name: str, results: dict) -> str | None:
         return render_answers(results)
     if name == "repeats":
         return render_repeats(results)
+    if name == "stretch-judge":
+        return render_stretch_judge(results)
+    if name == "own-ablation-queries":
+        return render_ablation_queries(results["sets"].get("own/own"))
+    for base in METRIC_BLOCKS:
+        if name == base or (name.startswith(base + "-") and name[len(base) + 1 :] in METRIC_SLUGS):
+            slug = None if name == base else name[len(base) + 1 :]
+            return render_stretch_cost(results, slug) if base == "stretch-cost" else render_stretch_agent(results, slug)
     for set_name, (corpus, query_set) in sorted(SETS.items(), key=lambda kv: -len(kv[0])):
         if name != set_name and not name.startswith(set_name + "-"):
             continue
@@ -416,7 +769,7 @@ def render(name: str, results: dict) -> str | None:
             return None
         s = results["sets"].get(f"{corpus}/{query_set}")
         if view == "ablation" and not (s and any(n.startswith("ablation/") for n in s["systems"])):
-            return "_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._"
+            return ABLATION_PLACEHOLDER
         if not s or not s["systems"]:
             where = "--corpus own" if corpus == "own" else f"--corpus shared --queries {query_set}"
             return f"_No scored runs here yet: run `uv run p2 run {where} --system bm25` (or `--all`), then `uv run p2 score`._"
@@ -425,7 +778,7 @@ def render(name: str, results: dict) -> str | None:
         if view == "classes":
             return render_classes(s, slug)
         if view == "origins":
-            return render_classes(s, slug, key="by_origin")
+            return render_origins(s, slug)
         if view == "pairs":
             return render_pairs(s["pairs"], slug)
         ablations = [p for p in s["pairs"] if p["a"].startswith("ablation/") != p["b"].startswith("ablation/")]

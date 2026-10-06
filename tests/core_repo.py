@@ -55,6 +55,18 @@ Prose that the student writes. TODO: write it.
 <!-- p2:begin own-ablation -->
 <!-- p2:end own-ablation -->
 
+<!-- p2:begin own-ablation-queries -->
+<!-- p2:end own-ablation-queries -->
+
+<!-- p2:begin stretch-judge -->
+<!-- p2:end stretch-judge -->
+
+<!-- p2:begin stretch-cost -->
+<!-- p2:end stretch-cost -->
+
+<!-- p2:begin stretch-agent -->
+<!-- p2:end stretch-agent -->
+
 <!-- p2:begin someone-elses-block -->
 left alone
 <!-- p2:end someone-elses-block -->

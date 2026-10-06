@@ -112,7 +112,8 @@ The same scores per query class.
 _No scored runs here yet: run `uv run p2 run --corpus own --system bm25` (or `--all`), then `uv run p2 score`._
 <!-- p2:end own-classes -->
 
-The same scores for the queries you wrote yourself (`hand`) and the ones a model drafted (`claude`).
+The same scores for the queries you wrote yourself (`hand`) and the ones a model drafted (`claude`), with the difference between the two groups and its interval.
+Once both groups have queries, the table also says whether `bm25`'s lead over `dense` differs between them, and what share of each query's content words its best relevant document contains, which is stretch option 6.
 
 <!-- p2:begin own-origins -->
 _No scored runs here yet: run `uv run p2 run --corpus own --system bm25` (or `--all`), then `uv run p2 score`._
@@ -142,8 +143,16 @@ The run file for it lives in `runs/own/ablation/`.
 _No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._
 <!-- p2:end own-ablation -->
 
+The queries your ablation helped and hurt, against the system it varies, by reciprocal rank.
+`p2 score` finds that system from a line such as `BASE = "bm25"` in your variant's file, or else from its name: `bm25_lab` varies `bm25`.
+
+<!-- p2:begin own-ablation-queries -->
+_No ablation runs yet: `uv run p2 run --corpus own --system NAME --ablation` writes one to runs/own/ablation/, then `uv run p2 score` fills this table._
+<!-- p2:end own-ablation-queries -->
+
 What did you change, what happened, and does the interval support the claim you want to make?
 If the result is not distinguishable, say what size of effect your gold set could have seen.
+Read the queries at the top of each list in the second table, and say whether your change explains them.
 
 TODO: write the ablation: the one change, the hypothesis, the result and the claim.
 
@@ -177,9 +186,48 @@ TODO: write the cross-corpus comparison.
 
 ## 8. Stretch
 
-498E: name the one stretch you did, say which files hold it, and write what you found.
-598E: the rider below is your stretch, so write "rider" here.
-The options are in the brief.
+498E: the stretch is one of the six options in the brief's "One stretch" section, and that section says what earns the 25 points for each.
+It is optional, so `uv run p2 check --final` never waits on this section.
+598E: the rider is your stretch, so write "rider" below and put its results in section 9; the other options add no points, because the project is capped at 150.
+
+Whichever option you chose, write these five things:
+
+1. The option's name.
+2. What you did, and the files that hold it.
+3. The table `p2 score` wrote for it, by name: one of the three below, `own-ablation` and `own-ablation-queries` in section 5 for a second ablation, `own-origins` in section 4 for the hand and claude queries, or `repeats` in section 9 for the rider.
+4. What its interval lets you claim, and what it does not.
+5. One thing you would do next, and what result would tell you it worked.
+
+For a second ablation, write its hypothesis here before you run it, and commit it, so your history shows that it came first.
+For the hand and claude queries, do the same with your prediction before you score.
+
+### Claim-level faithfulness check (option 2)
+
+Claude's verdicts from `p2 judge` against your own verdicts in the calibration file.
+
+<!-- p2:begin stretch-judge -->
+_No judged answers yet (stretch option 2): `uv run p2 judge answers/shared/LABEL.json` writes them, your own verdicts go in answers/shared/LABEL.calibration.tsv, and then `uv run p2 score` fills this table._
+<!-- p2:end stretch-judge -->
+
+### Cost and latency (option 3)
+
+The Claude calls, tokens and seconds in every trace you committed, and what a cheaper system or answers file saves against what it loses.
+
+<!-- p2:begin stretch-cost -->
+_No Claude traces yet: a run of a system that calls Claude, `p2 answer` and `p2 judge` write them in traces/, and then `uv run p2 score` fills this table._
+<!-- p2:end stretch-cost -->
+
+### The grep agent (option 5)
+
+Your stretch run on some of your own queries against the four systems on the same queries.
+
+<!-- p2:begin stretch-agent -->
+_No stretch runs yet (stretch option 5): `uv run p2 run --corpus own --queries eval/own/agent.queries.tsv --system agent --stretch` writes one to runs/own/stretch/, then `uv run p2 score` fills this table._
+<!-- p2:end stretch-agent -->
+
+### Your stretch
+
+Write the five things here.
 
 ---
 

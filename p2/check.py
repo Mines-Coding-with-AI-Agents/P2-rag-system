@@ -15,9 +15,14 @@ Integrity, the part CI runs on every push:
   near-ties; a system that calls Claude is checked against its committed trace instead (one span
   per query with a Claude call, listing the same documents), and must not repeat another system's run;
 - results/results.json and the EVAL.md tables equal a fresh `p2 score` (to 3 decimals), and none of
-  the EVAL.md tables is missing;
+  the EVAL.md tables is missing; the one part left out is the seconds of the systems that do not call
+  Claude in the stretch-cost table, which come from traces/retrieval/, a folder git ignores;
 - every answers file passes the quote check's mechanics (its retrieved ids are real chunks, its
-  claims have a chunk id and a quote); how many quotes verify is a result, reported by p2 score;
+  claims have a chunk id and a quote), and its trace, when there is one, still has a span with the
+  same chunks for every question; how many quotes verify is a result, reported by p2 score;
+- stretch option 2: every judged file matches its answers file and its committed trace, and every
+  calibration file (your own verdicts) is well-formed;
+- stretch runs (runs/own/stretch/) use queries of your own gold set and are checked like the others;
 - `p2 license` (offline) on your own corpus once it has documents, and the corpus size limits.
 Completeness, reported as TODO until done:
 - runs for bm25, dense, hybrid and rerank on shared practice, shared test and your own corpus;
@@ -40,7 +45,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from p2 import config, paths, retrievers, score, trace, verify
+from p2 import config, judge, paths, retrievers, score, trace, verify
 from p2 import corpus as corpus_mod
 from p2.limits import CI_MINUTES, OWN_MAX_BYTES, OWN_MAX_FILE_BYTES, OWN_MIN_DOCS, OWN_TOKEN_LIMIT, OWN_TOKEN_WARNING, SUGGESTED_PART_PAGES, TOKENS_PER_WORD
 from p2.runfile import read_qrels, read_queries, read_questions, read_run, run_tag, summarize, validate_run
@@ -345,13 +350,19 @@ def check_ingest_report(ctx: Context, r: Report) -> None:
 def check_runs(ctx: Context, r: Report) -> list[score.RunRef]:
     """Validate every run file; returns the ones that are well-formed."""
     for path in ctx.odd:
-        r.fail(f"{rel(ctx, path)} is a run file p2 can read", "its name does not follow runs/shared/<name>.<practice|test>.trec, runs/own/<name>.trec or runs/own/ablation/<name>.trec",
+        r.fail(f"{rel(ctx, path)} is a run file p2 can read", "its name does not follow runs/shared/<name>.<practice|test>.trec, runs/own/<name>.trec, runs/own/ablation/<name>.trec or runs/own/stretch/<name>.trec",
                "Rename or remove it, then commit.")  # fmt: skip
     systems = retrievers.names()
     good = []
     for ref in ctx.refs:
         queries = ctx.queries(ref.corpus, ref.query_set)
-        problems = validate_run(ref.path, k=ctx.cfg.k, docids=ctx.doc_ids(ref.corpus), qids=[q.qid for q in queries] if queries else None)
+        qids = [q.qid for q in queries] if queries and not ref.stretch else None
+        problems = validate_run(ref.path, k=ctx.cfg.k, docids=ctx.doc_ids(ref.corpus), qids=qids)
+        if ref.stretch and not problems:
+            # a stretch run covers some of your own queries, not all of them
+            stray = sorted(set(read_run(ref.path)) - {q.qid for q in queries})
+            if stray:
+                problems.append(f"it has queries that are not in eval/own/queries.tsv, such as {stray[0]}")
         tag = run_tag(ref.path)
         if tag and tag not in systems:
             problems.append(f"its tag {tag} names no system in p2/retrievers/")
@@ -467,6 +478,8 @@ def check_regenerate(ctx: Context, r: Report, refs: list[score.RunRef]) -> None:
             committed = read_run(ref.path)
             problem = None
             for q in ctx.queries(ref.corpus, ref.query_set):
+                if ref.stretch and q.qid not in committed:
+                    continue  # a stretch run covers only the queries it names
                 fresh = [tuple(x) for x in st["fresh"].get(q.qid, [])]
                 deep = [tuple(x) for x in st["deep"].get(q.qid, [])]
                 diff = compare_lists(committed.get(q.qid, []), fresh, deep)
@@ -488,7 +501,7 @@ def check_regenerate(ctx: Context, r: Report, refs: list[score.RunRef]) -> None:
 
 def claude_trace_problem(ctx: Context, ref: score.RunRef, committed: dict) -> str | None:
     """Why the committed trace of a Claude run does not back up its run file, or None."""
-    path = paths.trace_file(ctx.root, ref.corpus, ref.query_set, ref.name, ref.repeat, ref.ablation, calls_claude=True)
+    path = paths.trace_file(ctx.root, ref.corpus, ref.query_set, ref.name, ref.repeat, ref.ablation, calls_claude=True, stretch=ref.stretch)
     if not path.is_file():
         return f"{rel(ctx, path)} is missing; `uv run p2 run` writes it with the run file as the record of the Claude calls"
     try:
@@ -523,14 +536,18 @@ def check_claude_runs(ctx: Context, r: Report, refs: list[score.RunRef]) -> list
         what = f"{rel(ctx, ref.path)} matches its Claude trace"
         problem = claude_trace_problem(ctx, ref, committed)
         if problem:
-            r.fail(what, problem, "Run it again with `uv run p2 run` and commit the run file and its trace in traces/ together.")
+            again = f"`uv run p2 run --corpus own --queries FILE --system {tag} --stretch`" if ref.stretch else "`uv run p2 run`"
+            r.fail(what, problem, f"Run it again with {again} and commit the run file and its trace in traces/ together.")
             continue
         lists = {q: [d for d, _ in v] for q, v in committed.items()}
         twin = None
         for other in ctx.good:
             if other.path == ref.path or other.corpus != ref.corpus or other.query_set != ref.query_set or run_tag(other.path) == tag:
                 continue
-            if {q: [d for d, _ in v] for q, v in read_run(other.path).items()} == lists:
+            theirs = {q: [d for d, _ in v] for q, v in read_run(other.path).items()}
+            if ref.stretch:
+                theirs = {q: theirs.get(q) for q in lists}
+            if theirs == lists:
                 twin = other
                 break
         if twin is not None:
@@ -556,7 +573,7 @@ def check_results(ctx: Context, r: Report) -> dict:
             committed = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             committed = None
-        where = "the file is not valid JSON" if committed is None else score.same_results(committed, fresh)
+        where = "the file is not valid JSON" if committed is None else score.same_results(score.comparable(committed), score.comparable(fresh))
         if where:
             r.fail(what, f"they differ at {where}", "Run `uv run p2 score` and commit what it writes.")
         else:
@@ -578,7 +595,7 @@ def check_results(ctx: Context, r: Report) -> dict:
         known += 1
         if not body.strip() and expected.startswith("_"):
             continue  # an empty block, and nothing to put in it yet
-        if not score.same_text(body, expected):
+        if not score.same_text(score.checked_part(name, body), score.checked_part(name, expected)):
             stale.append(name)
     if problems:
         r.fail(what, summarize(problems), "Put the p2 markers back as in the template, then run `uv run p2 score`.")
@@ -594,7 +611,7 @@ def check_results(ctx: Context, r: Report) -> dict:
 
 
 def check_answers(ctx: Context, r: Report) -> None:
-    files = sorted((ctx.root / "answers").glob("*/*.json"))
+    files = paths.answers_files(ctx.root)
     if not files:
         return
     questions_cache: dict[str, dict] = {}
@@ -620,10 +637,67 @@ def check_answers(ctx: Context, r: Report) -> None:
                 problems.append(f"{record['qid']} does not match its line in eval/{corpus}/questions.tsv")
         if problems:
             r.fail(what, summarize(problems), "Run `uv run p2 answer` again to rewrite it, then commit.")
+            continue
+        stale = answers_trace_problem(ctx, path, data)
+        if stale:
+            trace_path = rel(ctx, paths.answers_trace(ctx.root, path.stem))
+            r.fail(f"{trace_path} matches {rel(ctx, path)}", stale,
+                   f"Restore the committed trace with `git checkout -- {trace_path}`, or run `uv run p2 answer` for {path.stem} again (saved replies cost nothing) and commit both.")  # fmt: skip
         else:
             good += 1
     if good:
         r.ok(f"{good} answers file(s) well-formed", "how many quotes verify is in results.json and EVAL.md")
+
+
+def answers_trace_problem(ctx: Context, path: Path, data: dict) -> str | None:
+    """Why an answers file's trace no longer describes it (an interrupted run or a trial rewrote the
+    trace), or None; an answers file without a trace is fine, and the cost table then reads the file."""
+    trace_path = paths.answers_trace(ctx.root, path.stem)
+    if not trace_path.is_file():
+        return None
+    try:
+        spans = {str(s.get("p2.qid")): s for s in trace.read(trace_path)}
+    except (OSError, ValueError):
+        return "the trace cannot be read"
+    for record in data["answers"]:
+        span = spans.get(str(record["qid"]))
+        if span is None:
+            return f"the trace has no span for {record['qid']}, so it was written by another run of p2 answer"
+        if list(span.get("p2.top_ids") or []) != list(record["retrieved"]):
+            return f"the trace lists other chunks for {record['qid']} than the answers file"
+    return None
+
+
+def check_judged(ctx: Context, r: Report) -> None:
+    """Stretch option 2: judged files backed by their answers file and trace, and well-formed calibration files."""
+    base = ctx.root / "answers"
+    judged = sorted(base.glob(f"*/*{paths.JUDGED_SUFFIX}")) if base.is_dir() else []
+    calibrations = sorted(base.glob(f"*/*{paths.CALIBRATION_SUFFIX}")) if base.is_dir() else []
+    good = 0
+    for path in judged:
+        problems = judge.integrity(ctx.root, path)
+        if problems:
+            r.fail(f"{rel(ctx, path)} matches its answers file and its Claude trace", summarize(problems),
+                   f"Run `uv run p2 judge {rel(ctx, path.with_name(paths.answers_stem(path) + '.json'))}` again and commit the judged file and its trace in traces/ together.")  # fmt: skip
+        else:
+            good += 1
+    for path in calibrations:
+        answers = path.with_name(paths.answers_stem(path) + ".json")
+        what = f"{rel(ctx, path)} is a calibration file p2 can read"
+        if not answers.is_file():
+            r.fail(what, f"there is no answers file {rel(ctx, answers)} beside it", "Name it after the answers file whose claims you labeled (rerank.calibration.tsv for rerank.json), then commit.")
+            continue
+        try:
+            known = {c["id"] for c in judge.claims_of(verify.load_answers(answers))}
+        except verify.AnswersError:
+            continue  # check_answers reports the answers file
+        labels, problems = judge.read_calibration(path, known)
+        if problems:
+            r.fail(what, summarize(problems), "Fix those lines (a claim id such as a01-c1, a tab, supported, partly or not, a tab, a note), then commit.")
+        else:
+            good += 1
+    if good:
+        r.ok(f"{good} judged or calibration file(s) well-formed", "stretch option 2")
 
 
 # ---- completeness ----
@@ -644,7 +718,7 @@ def _how_to_run(ctx: Context, corpus: str, query_set: str, missing: list[str]) -
 
 
 def check_complete_runs(ctx: Context, r: Report) -> None:
-    present = {(x.corpus, x.query_set, x.name) for x in ctx.good if x.repeat is None and not x.ablation and run_tag(x.path) == x.name}
+    present = {(x.corpus, x.query_set, x.name) for x in ctx.good if x.repeat is None and not x.ablation and not x.stretch and run_tag(x.path) == x.name}
     for corpus, query_set in (("shared", "practice"), ("shared", "test"), ("own", "own")):
         where = "own corpus" if corpus == "own" else f"shared {query_set} queries"
         missing = [s for s in retrievers.CANONICAL if (corpus, query_set, s) not in present]
@@ -718,6 +792,11 @@ def check_notes(ctx: Context, r: Report, results: dict) -> None:
     if len(group) >= 3:
         r.note("own gold set: queries made from one pattern",
                f"{len(group)} queries read alike apart from their numbers, such as {group[0]} and {group[1]}; queries from one pattern test one thing many times")  # fmt: skip
+    pooled = ((results.get("stretch") or {}).get("judge") or {}).get("pooled")
+    labeled = sum(e["labeled"] for e in (((results.get("stretch") or {}).get("judge") or {}).get("files") or {}).values())
+    if labeled and (pooled or {}).get("compared", 0) < judge.CALIBRATION_MIN:
+        r.note("stretch option 2: claims you labeled that Claude judged",
+               f"{(pooled or {}).get('compared', 0)} of the {judge.CALIBRATION_MIN} the stretch asks for; label more claims, or judge a second answers file and label claims from it too")  # fmt: skip
     own = results.get("sets", {}).get("own/own")
     if own and own["systems"]:
         best = max(v["mean"]["mrr@10"] for v in own["systems"].values())
@@ -740,7 +819,7 @@ def check_complete_answers(ctx: Context, r: Report) -> None:
     wanted = {q.qid for q in read_questions(qpath)[0]} if qpath.is_file() else set()
     what = "an answers file on all the shared questions"
     complete, partial = [], []
-    for path in sorted((ctx.root / "answers" / "shared").glob("*.json")):
+    for path in [p for p in paths.answers_files(ctx.root) if p.parent.name == "shared"]:
         if "." in path.stem and paths.REPEAT_RE.match(path.stem.rsplit(".", 1)[-1]):
             continue
         try:
@@ -849,7 +928,7 @@ def check_rider_answers(ctx: Context, r: Report) -> None:
     qpath = paths.questions(ctx.root, "shared")
     wanted = {q.qid for q in read_questions(qpath)[0]} if qpath.is_file() else set()
     groups: dict[str, dict[int, Path]] = {}
-    for path in (ctx.root / "answers" / "shared").glob("*.json"):
+    for path in [p for p in paths.answers_files(ctx.root) if p.parent.name == "shared"]:
         parts = path.stem.split(".")
         if len(parts) == 2 and paths.REPEAT_RE.match(parts[1]):
             groups.setdefault(parts[0], {})[int(parts[1][1:])] = path
@@ -966,6 +1045,7 @@ def run_checks(root: Path, final: bool = False) -> list[Item]:
         lambda: check_regenerate(ctx, r, check_runs(ctx, r)),
         keep_results,
         lambda: check_answers(ctx, r),
+        lambda: check_judged(ctx, r),
         lambda: check_complete_runs(ctx, r),
         lambda: check_complete_own(ctx, r),
         lambda: check_complete_answers(ctx, r),

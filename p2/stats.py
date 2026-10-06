@@ -3,6 +3,9 @@
 - paired_bootstrap: resample the queries (10,000 times, seed 0) and take the middle 95% of the
   resampled mean differences; when the interval includes 0, the two systems are not distinguishable
   on this gold set.
+- unpaired_bootstrap: the same for two separate groups of queries (your hand queries and the ones a
+  model drafted, say): each resample draws the queries of each group from that group only, and the
+  interval is the middle 95% of the resampled differences of the two group means.
 - mdd: the smallest true difference a paired test on n queries detects 80% of the time at the 5%
   level, from the standard deviation of the per-query differences:
   (z(0.975) + z(0.80)) * sd / sqrt(n), about 2.8 * sd / sqrt(n).
@@ -56,6 +59,34 @@ def paired_bootstrap(a: Sequence[float], b: Sequence[float], resamples: int = RE
     return {"n": n, "mean_diff": float(d.mean()), "ci95": [float(lo), float(hi)], "sd_diff": sd(d.tolist())}
 
 
+def _resampled_means(rng: np.random.Generator, values: np.ndarray, resamples: int) -> np.ndarray:
+    """The means of `resamples` resamples (with replacement) of `values`, in bounded memory."""
+    n = len(values)
+    means = np.empty(resamples, dtype=np.float64)
+    step = max(1, 2_000_000 // n)
+    for start in range(0, resamples, step):
+        stop = min(start + step, resamples)
+        means[start:stop] = values[rng.integers(0, n, size=(stop - start, n))].mean(axis=1)
+    return means
+
+
+def unpaired_bootstrap(a: Sequence[float], b: Sequence[float], resamples: int = RESAMPLES, seed: int = SEED, level: float = 0.95) -> dict:
+    """The difference of two group means, mean(a) - mean(b), and a percentile bootstrap interval for it.
+
+    The groups are separate queries (not the same queries scored twice), so each resample draws len(a)
+    values from a and len(b) values from b, each group on its own; the interval is the middle `level`
+    of the resampled differences. Both groups need at least one value."""
+    va = np.asarray(a, dtype=np.float64)
+    vb = np.asarray(b, dtype=np.float64)
+    if len(va) == 0 or len(vb) == 0:
+        raise ValueError("each group needs at least one value")
+    rng = np.random.default_rng(seed)
+    diffs = _resampled_means(rng, va, resamples) - _resampled_means(rng, vb, resamples)
+    tail = (1 - level) / 2 * 100
+    lo, hi = np.percentile(diffs, [tail, 100 - tail])
+    return {"n_a": len(va), "n_b": len(vb), "mean_diff": float(va.mean() - vb.mean()), "ci95": [float(lo), float(hi)]}
+
+
 def mdd(sd_diff: float, n: int, alpha: float = 0.05, power: float = 0.80) -> float:
     """Minimum detectable difference of a paired test on n queries."""
     if n <= 0:
@@ -78,7 +109,11 @@ def wilson(k: int, n: int, level: float = 0.95) -> list[float]:
     p = k / n
     centre = (p + q * q / (2 * n)) / (1 + q * q / n)
     half = q * math.sqrt(p * (1 - p) / n + q * q / (4 * n * n)) / (1 + q * q / n)
-    return [max(0.0, centre - half), min(1.0, centre + half)]
+    # At k = 0 and k = n the bound is exactly 0 or 1; the formula lands one rounding step short on
+    # some builds of Python, so those ends are set exactly.
+    low = 0.0 if k == 0 else max(0.0, centre - half)
+    high = 1.0 if k == n else min(1.0, centre + half)
+    return [low, high]
 
 
 IDENTICAL = "identical on every query"

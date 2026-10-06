@@ -1,4 +1,4 @@
-"""One `claude -p` call, the way the 13 lab makes it, for the reranker and the answers.
+"""One `claude -p` call, the way the 13 lab makes it, for the reranker, the answers and the judge.
 
 - It launches the claude command by its full path, on the model from p2.toml (default Sonnet),
   with --tools "" (no tools: the model sees only what the prompt gives it), --json-schema (the reply
@@ -6,13 +6,21 @@
   system prompt is given, --system-prompt (it replaces Claude Code's own instructions).
 - It runs in an empty temporary folder with --setting-sources project,local, so no CLAUDE.md or
   user setting changes the call, and --no-session-persistence, so calls do not fill your history.
+- The one exception is an agent that searches with tools, as in the 12 lab's agent_search.py
+  (stretch option 5): call(..., tools=AGENT_TOOLS, cwd=<a docs folder>) gives Claude the Grep, Glob
+  and Read tools only (--tools and --allowedTools), and runs it in a fresh copy of that folder in
+  the system's temporary space, each tool allowed only inside that copy (Read(./**) and the like, so
+  even an absolute path elsewhere is denied): the agent searches your documents and nothing else, cannot
+  reach the rest of your repo (your gold set above all), and loads no CLAUDE.md, which also keeps
+  every call cheaper than it was in the lab. Every other rule below still holds.
 - It uses your Claude Code sign-in: ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are removed from the
   child's environment, so a leftover key is never billed by accident.
 - The prompt goes in on standard input, which has no length limit (a command line on Windows stops
   near 32,000 characters).
-- With a cache folder, a reply is saved under a hash of everything sent, and the same call later
-  returns the saved reply at no cost; pass no cache folder (or --fresh) to ask again.
-- The call's model and token counts are added to the open trace span (see p2/trace.py).
+- With a cache folder, a reply is saved under a hash of everything sent (for an agent, also its tools
+  and the contents of its folder), and the same call later returns the saved reply at no cost; pass
+  no cache folder (or --fresh) to ask again.
+- The call's model, token counts and seconds are added to the open trace span (see p2/trace.py).
 - `p2 check` runs your systems again with Claude switched off (the P2_NO_CLAUDE environment
   variable): a call then raises ClaudeBlocked, which is how the check learns that a system really
   calls Claude. ClaudeBlocked is not an Exception, so an `except Exception` in your code lets it through.
@@ -34,6 +42,7 @@ from pathlib import Path
 from p2 import trace
 
 KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+AGENT_TOOLS = ("Grep", "Glob", "Read")  # the only tools a call may have: they read and search, and change nothing
 NO_CLAUDE_VAR = "P2_NO_CLAUDE"
 TIMEOUT_S = 600
 _warned_keys = False
@@ -61,6 +70,7 @@ class Reply:
     error: str | None = None
     cost_usd: float | None = None
     cached: bool = False
+    turns: int | None = None  # how many turns an agent with tools took (None for a call without tools)
 
 
 def find_claude() -> str:
@@ -88,11 +98,27 @@ def child_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in KEY_VARS}
 
 
-def command(claude: str, schema: dict, model: str, system: str | None) -> list[str]:
+def check_tools(tools) -> tuple[str, ...]:
+    """The tools of a call, checked: none, or some of Grep, Glob and Read (the order is kept)."""
+    if isinstance(tools, str):
+        tools = [t.strip() for t in tools.split(",") if t.strip()]
+    tools = tuple(tools or ())
+    other = [t for t in tools if t not in AGENT_TOOLS]
+    if other or len(set(tools)) != len(tools):
+        raise ValueError(f"A claude -p call in p2 may use only the tools {', '.join(AGENT_TOOLS)}, each once; not {', '.join(other) or 'a tool twice'}.")
+    return tools
+
+
+def command(claude: str, schema: dict, model: str, system: str | None, tools: tuple[str, ...] = ()) -> list[str]:
+    """The claude -p command line; the prompt itself goes in on standard input."""
+    tools = check_tools(tools)
+    # Each tool is allowed only inside the working folder (the fresh copy of the documents): a path
+    # outside it, even an absolute one, is denied, so the agent cannot open the gold set.
+    allowed = ["--tools", ",".join(tools), "--allowedTools", ",".join(f"{t}(./**)" for t in tools)] if tools else ["--tools", ""]
     cmd = [
         claude, "-p",
         "--model", model,
-        "--tools", "",
+        *allowed,
         "--output-format", "json",
         "--json-schema", json.dumps(schema),
         "--setting-sources", "project,local",
@@ -118,50 +144,96 @@ def parse(stdout: str, stderr: str, seconds: float, model: str) -> Reply:
     used = list((data.get("modelUsage") or {}).keys())
     resolved = max(used, key=lambda m: (data["modelUsage"][m] or {}).get("outputTokens", 0)) if used else model
     cost = data.get("total_cost_usd")
+    turns = data.get("num_turns") if isinstance(data.get("num_turns"), int) else None
     output = data.get("structured_output")
     if data.get("is_error") or not isinstance(output, dict):
         reason = data.get("result") if isinstance(data.get("result"), str) and data.get("result") else data.get("subtype")
-        return Reply(None, seconds, tokens_in, tokens_out, resolved, error=str(reason or "no structured_output in the reply")[:300], cost_usd=cost)
-    return Reply(output, seconds, tokens_in, tokens_out, resolved, cost_usd=cost)
+        return Reply(None, seconds, tokens_in, tokens_out, resolved, error=str(reason or "no structured_output in the reply")[:300], cost_usd=cost, turns=turns)
+    return Reply(output, seconds, tokens_in, tokens_out, resolved, cost_usd=cost, turns=turns)
 
 
-def cache_key(prompt: str, schema: dict, model: str, system: str | None) -> str:
-    blob = json.dumps([model, system, schema, prompt], sort_keys=True, ensure_ascii=False)
+_fingerprints: dict[tuple, str] = {}
+
+
+def folder_fingerprint(folder: Path) -> str:
+    """A short hash of every file name and file content under a folder (dot files left out), so an
+    agent's saved reply is used again only while its documents are the same."""
+    folder = Path(folder)
+    files = sorted(p for p in folder.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(folder).parts))
+    stamp = (str(folder.resolve()), tuple((p.as_posix(), p.stat().st_size, p.stat().st_mtime_ns) for p in files))
+    if stamp not in _fingerprints:
+        h = hashlib.sha256()
+        for p in files:
+            h.update(p.relative_to(folder).as_posix().encode("utf-8") + b"\0" + p.read_bytes() + b"\0")
+        _fingerprints[stamp] = h.hexdigest()[:24]
+    return _fingerprints[stamp]
+
+
+def cache_key(prompt: str, schema: dict, model: str, system: str | None, tools: tuple[str, ...] = (), folder: str | None = None) -> str:
+    """The name a reply is saved under; a call without tools keeps the key it always had."""
+    parts = [model, system, schema, prompt] + ([list(tools), folder] if tools else [])
+    blob = json.dumps(parts, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
 
 
-def call(prompt: str, schema: dict, system: str | None = None, model: str = "sonnet", cache_dir: Path | None = None, timeout: int = TIMEOUT_S) -> Reply:
-    """One claude -p call with no tools and a reply forced into `schema`."""
+def call(
+    prompt: str, schema: dict, system: str | None = None, model: str = "sonnet", cache_dir: Path | None = None,
+    timeout: int = TIMEOUT_S, tools=(), cwd: Path | None = None,
+) -> Reply:
+    """One claude -p call with a reply forced into `schema`.
+
+    With no tools (the default) Claude sees only the prompt. With tools (some of AGENT_TOOLS) it runs
+    as an agent on a fresh copy of `cwd` (a folder that must exist) in the system's temporary space, and
+    can search and read those files and nothing else."""
     global blocked_calls
     if os.environ.get(NO_CLAUDE_VAR):
         blocked_calls += 1
         raise ClaudeBlocked("Claude is switched off here (p2 check never calls Claude)")
-    cache_file = Path(cache_dir) / f"{cache_key(prompt, schema, model, system)}.json" if cache_dir else None
+    tools = check_tools(tools)
+    if tools and (cwd is None or not Path(cwd).is_dir()):
+        raise ValueError("A claude -p call with tools needs cwd, the folder it searches (for example your corpus's docs folder).")
+    folder = folder_fingerprint(Path(cwd)) if tools else None
+    cache_file = Path(cache_dir) / f"{cache_key(prompt, schema, model, system, tools, folder)}.json" if cache_dir else None
     if cache_file and cache_file.is_file():
         saved = json.loads(cache_file.read_text(encoding="utf-8"))
-        reply = Reply(saved["output"], saved["seconds"], saved["input_tokens"], saved["output_tokens"], saved["model"], cost_usd=saved.get("cost_usd"), cached=True)
-        trace.add_usage(reply.model, reply.input_tokens, reply.output_tokens, reply.cost_usd, cached=True)
+        reply = Reply(saved["output"], saved["seconds"], saved["input_tokens"], saved["output_tokens"], saved["model"], cost_usd=saved.get("cost_usd"), cached=True, turns=saved.get("turns"))
+        trace.add_usage(reply.model, reply.input_tokens, reply.output_tokens, reply.cost_usd, cached=True, seconds=reply.seconds, turns=reply.turns)
         return reply
-    cmd = command(find_claude(), schema, model, system)
+    cmd = command(find_claude(), schema, model, system, tools)
     start = time.perf_counter()
     try:
-        # An empty folder, so no CLAUDE.md is picked up; on Windows a virus scanner can hold it for a
-        # moment after the call, and a folder left behind must not lose the reply.
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as empty:
-            done = subprocess.run(
-                cmd, cwd=empty, env=child_env(), input=prompt, capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=timeout,
-            )  # fmt: skip
+        if tools:
+            # A fresh copy of the documents, outside the repo: the agent can read only them, cannot reach
+            # the gold set or anything else around them, and loads no CLAUDE.md from the folders above.
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                work = Path(tmp) / "docs"
+                shutil.copytree(Path(cwd), work, ignore=shutil.ignore_patterns(".*"))
+                done = subprocess.run(
+                    cmd, cwd=work, env=child_env(), input=prompt, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                )  # fmt: skip
+        else:
+            # An empty folder, so no CLAUDE.md is picked up; on Windows a virus scanner can hold it for a
+            # moment after the call, and a folder left behind must not lose the reply.
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as empty:
+                done = subprocess.run(
+                    cmd, cwd=empty, env=child_env(), input=prompt, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                )  # fmt: skip
     except subprocess.TimeoutExpired:
         seconds = time.perf_counter() - start
         trace.add_usage(model, 0, 0)
         return Reply(None, seconds, 0, 0, model, error=f"no reply within {timeout} s")
     seconds = time.perf_counter() - start
     reply = parse(done.stdout, done.stderr, seconds, model)
-    trace.add_usage(reply.model, reply.input_tokens, reply.output_tokens, reply.cost_usd)
+    if not tools:
+        reply.turns = None  # a call without tools always takes the same turns; only an agent's are worth keeping
+    trace.add_usage(reply.model, reply.input_tokens, reply.output_tokens, reply.cost_usd, turns=reply.turns)
     if cache_file and reply.error is None:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         saved = {"output": reply.output, "seconds": round(seconds, 1), "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens, "model": reply.model, "cost_usd": reply.cost_usd}
+        if reply.turns is not None:
+            saved["turns"] = reply.turns
         cache_file.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8", newline="\n")
     return reply
 

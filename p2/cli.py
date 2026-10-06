@@ -4,6 +4,7 @@
     p2 score    score the runs and answers, write results/results.json, rewrite the EVAL.md tables
     p2 answer   answer the shared questions with Claude, citing chunks
     p2 verify   print the quote check for one answers file
+    p2 judge    ask Claude whether each claim's quote supports the claim (stretch option 2)
     p2 ingest   turn a folder of PDF, HTML, Markdown or text files into your own corpus
     p2 license  check the licenses of your own corpus and write LICENSES.md
     p2 check    is everything well-formed and reproducible, and what is left to do
@@ -37,6 +38,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--k", type=int, help="documents per query (default: k in p2.toml; p2 check expects that value)")
     run.add_argument("--label", help="name the run file after this label instead of the system")
     run.add_argument("--ablation", action="store_true", help="own corpus only: write the run to runs/own/ablation/")
+    run.add_argument("--stretch", action="store_true", help="own corpus only: a stretch run on a queries file of lines copied from eval/own/queries.tsv, written to runs/own/stretch/ (the grep agent of stretch option 5)")
     run.add_argument("--repeat", type=int, default=0, metavar="N", help="598E: run N times with fresh Claude replies, into .r1 to .rN files")
     run.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
     run.add_argument("--extra-corpus", type=Path, metavar="DIR", help="add the documents in DIR for this run only (never written to the repo)")
@@ -60,6 +62,12 @@ def parser() -> argparse.ArgumentParser:
 
     ve = sub.add_parser("verify", help="print the quote check for one answers file")
     ve.add_argument("file", nargs="?", help="an answers file (default: the newest one)")
+
+    ju = sub.add_parser("judge", help="ask Claude whether each claim's quote supports the claim, one call per claim (stretch option 2)")
+    ju.add_argument("file", metavar="FILE", help="an answers file, such as answers/shared/rerank.json")
+    ju.add_argument("--only", help="only the claims of these question ids, for example a01,a02")
+    ju.add_argument("--fresh", action="store_true", help="ask Claude again instead of using saved replies")
+    ju.add_argument("--yes", action="store_true", help=f"go ahead without asking when this makes more than {CONFIRM_ABOVE} claude -p calls")
 
     ing = sub.add_parser("ingest", help="turn a folder of documents into your own corpus (needs `uv sync --group ingest`)")
     ing.add_argument("src_dir", metavar="SRC_DIR", nargs="?", help="the folder of PDF, HTML, Markdown or text files")
@@ -120,6 +128,7 @@ def run_one(cfg: config.Config, corpus: corpus_mod.Corpus, name: str, query_set:
     model = getattr(system, "model", None)
     calls_claude = retrievers.needs_claude(name)
     results = {}
+    input_tokens = 0
     with Tracer(trace_path) as tracer:
         for n, q in enumerate(queries, 1):
             if calls_claude:
@@ -128,12 +137,16 @@ def run_one(cfg: config.Config, corpus: corpus_mod.Corpus, name: str, query_set:
             with tracer.span(f"retrieval {name}", "retrieval", name, q.qid, model=model) as span:
                 hits = checked(name, system.search(q.text, k), corpus, k)
                 span["p2.top_ids"] = [d for d, _ in hits]
+            input_tokens += int(span["gen_ai.usage.input_tokens"] or 0)
             results[q.qid] = hits
     write_run(out, results, tag=name, k=k)
     seconds = time.perf_counter() - started
     root = cfg.root
     line = f"{label}: wrote {paths.rel(root, out)} ({len(queries)} queries, {seconds:.1f} s"
-    line += f", {seconds / len(queries):.1f} s per query)" if calls_claude and queries else ")"
+    if calls_claude and queries:
+        line += f", {seconds / len(queries):.1f} s and {input_tokens / len(queries):,.0f} input tokens per query)"
+    else:
+        line += ")"
     qrels_path = paths.qrels(root, corpus.name, query_set) if query_set in ("practice", "test", "own") else None
     mrr = None
     if qrels_path and qrels_path.is_file():
@@ -166,6 +179,9 @@ def cmd_run(args, cfg: config.Config) -> int:
     if args.ablation and args.corpus != "own":
         print("--ablation goes with --corpus own: ablations are measured on your own corpus.")
         return 2
+    if args.stretch and (args.corpus != "own" or args.ablation or args.repeat or args.out or args.extra_corpus or not args.queries):
+        print("--stretch goes with --corpus own and --queries FILE, a file of lines copied from eval/own/queries.tsv (for example 10 of them for the grep agent), and without --ablation, --repeat, --out or --extra-corpus.")
+        return 2
     query_set, qpath = resolve_queries(root, args.corpus, args.queries)
     if not qpath.is_file():
         print(f"{paths.rel(root, qpath)} is missing; write the queries first.")
@@ -177,6 +193,12 @@ def cmd_run(args, cfg: config.Config) -> int:
     if not queries:
         print(f"{paths.rel(root, qpath)} has no queries yet.")
         return 1
+    if args.stretch:
+        problem = stretch_queries_problem(root, queries)
+        if problem:
+            print(f"{paths.rel(root, qpath)}: {problem}")
+            return 1
+        query_set = "own"
     k = args.k or cfg.k
     if args.repeat or args.fresh:
         cfg = cfg.replace(cache_claude=False)
@@ -199,6 +221,10 @@ def cmd_run(args, cfg: config.Config) -> int:
         if args.out:
             out = args.out if repeat is None else args.out.with_name(f"{args.out.stem}.r{repeat}{args.out.suffix}")
             trace_path = out.with_name(out.stem + ".trace.jsonl")
+        elif args.stretch:
+            # A stretch run uses some of your own queries; it is committed with its trace, like a run in runs/.
+            out = paths.run_file(root, "own", "own", label, stretch=True)
+            trace_path = paths.trace_file(root, "own", "own", label, calls_claude=calls_claude, stretch=True)
         elif args.extra_corpus or qpath != paths.queries(root, args.corpus, query_set):
             # A run on extra documents or on a queries file of your own is not part of the contract,
             # so it goes to .cache/extra/ (ignored by git) instead of runs/.
@@ -213,6 +239,18 @@ def cmd_run(args, cfg: config.Config) -> int:
             print(error)
             return 1
     return 0
+
+
+def stretch_queries_problem(root: Path, queries) -> str | None:
+    """Why a stretch run's queries are not lines of your own gold set, or None when they are."""
+    own_path = paths.queries(root, "own", "own")
+    own = {q.qid: q for q in read_queries(own_path)[0]} if own_path.is_file() else {}
+    for q in queries:
+        if q.qid not in own:
+            return f"{q.qid} is not a query in eval/own/queries.tsv; a stretch run uses queries of your own gold set, so its scores can be compared with your other runs."
+        if own[q.qid].text != q.text:
+            return f"the text of {q.qid} differs from its line in eval/own/queries.tsv; copy the lines as they are."
+    return None
 
 
 def run_all(args, cfg: config.Config) -> int:
@@ -239,7 +277,8 @@ def run_all(args, cfg: config.Config) -> int:
     jobs = [(corpus, query_set, name, name, False) for corpus, query_set in sets for name in canonical]  # (corpus, query set, system, label, ablation)
     refs, _odd = discover(root)
     for ref in refs:
-        if ref.repeat is not None or (ref.corpus, ref.query_set) not in sets or (not ref.ablation and ref.name in canonical):
+        # repeats and stretch runs are made by a command of their own, never again by --all
+        if ref.repeat is not None or ref.stretch or (ref.corpus, ref.query_set) not in sets or (not ref.ablation and ref.name in canonical):
             continue
         tag = run_tag(ref.path)
         if tag in names:
@@ -333,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
         from p2 import verify
 
         return verify.run(args, cfg)
+    if args.command == "judge":
+        from p2 import judge
+
+        return judge.run(args, cfg)
     if args.command == "ingest":
         module = lazy("ingest", "ingest", "install the converters with `uv sync --group ingest` and run the command again.")
         return 1 if module is None else int(module.run(args) or 0)

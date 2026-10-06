@@ -41,7 +41,7 @@ def test_scored_runs_regenerate_and_match(tmp_path):
     lines = [i.line() for i in items]
     assert any(line.startswith("PASS committed runs match a fresh run: 2 run(s) of bm25") for line in lines), lines
     assert "PASS results/results.json matches a fresh `p2 score`" in lines
-    assert "PASS EVAL.md tables match a fresh `p2 score`: 9 table(s)" in lines
+    assert "PASS EVAL.md tables match a fresh `p2 score`: 13 table(s)" in lines
 
 
 def test_corrupted_run_fails_with_one_next_step(tmp_path):

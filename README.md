@@ -319,7 +319,7 @@ In my tests a 5-page part was about 1,700 words of a NIST report and about 3,300
    - At least **30 queries**, at least **10 with `origin` `hand`**, and every query with at least one relevant document.
    - `hand` means you wrote the query yourself, from your own question or from reading the corpus.
      `claude` means a model drafted it, which is allowed for the rest, and you still judge relevance.
-     The column exists so you can check whether the queries a model wrote favor the keyword systems, which they often do because they copy the document's own words.
+     The column exists so you can check whether the queries a model wrote favor the keyword systems, which they often do because they copy the document's own words; stretch option 6 measures it.
    - The `class` is a free word.
      The shared sets use `identifier`, `paraphrase` and `mixed`; use those or classes that fit your corpus, because per-class scores are reported.
    - Judge relevance by reading each document, and write your rule in `EVAL.md`.
@@ -339,6 +339,7 @@ In my tests a 5-page part was about 1,700 words of a NIST report and about 3,300
    Run it with `--ablation`, as in `uv run p2 run --corpus own --system bm25_lab --ablation`, which writes the run file to `runs/own/ablation/`.
    From then on `p2 run --all` runs it again only as that ablation, not on every query set.
    Then run `uv run p2 score` and write what the interval lets you claim; the `own-ablation` table in `EVAL.md` compares it with your other systems.
+   The `own-ablation-queries` table below it lists the queries your change helped and hurt against the system it varies, which `p2` finds from a line such as `BASE = "bm25"` in your variant's file, or else from its name: `bm25_lab` varies `bm25`.
 8. **Write the analysis** (next section), then `uv run p2 check --final`.
 
 ---
@@ -378,6 +379,7 @@ A claim that matches its interval is a good result even when the answer is "I ca
 ## The 598E rider
 
 The rider is required for 598E and is one of the stretch options for 498E.
+For a 598E student the rider is the stretch: you do not do the other options, and doing one as well adds no points, because the project is capped at 150.
 Set `section = "598E"` in `p2.toml`, which makes `p2 check --final` verify the files below.
 It has two parts, and I estimate 4 to 6 extra hours, mostly the larger gold set.
 
@@ -403,6 +405,131 @@ Say in `PREREG.md` how you chose the pair, the gap and the gold-set size.
 
 ---
 
+## One stretch
+
+The stretch is 25 of the 150 points.
+For 498E it is one of the six options below, your choice.
+For 598E it is the rider, which is required, and you do not do the other options: doing one as well adds no points, because the project is capped at 150.
+
+Every option is graded the same way.
+Each one below says what you hand in and what earns the 25 points, and each ends in `EVAL.md` section 8 with five things:
+
+1. the option's name;
+2. what you did, and the files that hold it;
+3. the table `p2 score` wrote for it, by name;
+4. what its interval lets you claim, and what it does not;
+5. one thing you would do next, and what result would tell you it worked.
+
+Pick your option early and try a small piece of it first, because the expensive ones draw on your Claude plan.
+
+### 1. The 598E rider
+
+The rider as the section above describes it: three repeats of the Claude steps on the shared corpus, and a pre-registered, powered claim on your own corpus.
+Set `section = "598E"` in `p2.toml`, so `p2 check --final` checks its files; in 498E, set it too, because the setting only switches on the rider's checks.
+
+**What you hand in:** the three reranker runs and the three answers files with their traces, `PREREG.md`, the `repeats` table and your write-up in `EVAL.md` section 9, and the word "rider" in section 8.
+**What earns the 25 points:** both parts done as that section says, the run-to-run spread read against the reranker's gain, `PREREG.md` committed before your first judgment, and its outcome reported.
+
+### 2. A claim-level faithfulness check
+
+`p2 verify` proves that a quote is really in the chunk it cites, and it cannot tell whether the quote supports the claim next to it.
+Here Claude judges exactly that, one claim at a time, and you measure how far to trust the judge by checking at least 20 claims yourself.
+
+1. Read `prompts/judge.txt`, a plain starting prompt that is yours to change, like `prompts/answer.txt`.
+2. Try two questions first, for example `uv run p2 judge answers/shared/rerank.json --only a01,a02` with the name of your own answers file, and then judge the whole file without `--only`.
+   It makes one Claude call per claim, asks first above 5 calls, and writes `answers/shared/rerank.judged.json` and `traces/judge-rerank.jsonl`.
+   Commit both, because `p2 check` compares the verdicts with the trace.
+3. Label at least 20 claims yourself, before you open the judged file, so Claude's verdicts cannot steer yours.
+   Write them in `answers/shared/rerank.calibration.tsv`, one line per claim with three fields separated by tabs: the claim id, your verdict (`supported`, `partly` or `not`), and a short note on why.
+   A claim's id is its question id and its number in that answer, so `a01-c1` is the first claim of a01; read the claim and its quote in the answers file, open the cited chunk, and decide.
+   No command writes this file, and Claude Code must not fill it in for you, because your verdicts are the measurement.
+   Twelve questions give about 10 to 20 claims, so if your answers file has fewer than 20, judge a second one (another system, or a repeat) and label claims from both.
+   If you run `p2 answer` again under the same label, its claims change, so judge and label them again.
+4. Run `uv run p2 score`.
+   The `stretch-judge` table in `EVAL.md` section 8 shows the share of claims where Claude's verdict is yours, with its Wilson 95% interval, and a 3 by 3 table of Claude's verdicts against yours.
+
+If you change `prompts/judge.txt` after you have labeled claims, you are tuning the judge on your own labels, so say so, and report the agreement from before the change too.
+A judge call is short: 1,400 to 4,500 input tokens in my tests, so judging 20 claims costs about as much as seven answer calls.
+
+**What you hand in:** each judged file and its trace from `p2 judge` (`answers/shared/<label>.judged.json` and `traces/judge-<label>.jsonl`), your own `answers/shared/<label>.calibration.tsv`, the `stretch-judge` table, and the five things in `EVAL.md` section 8.
+**What earns the 25 points:** at least 20 claims labeled by you and judged by Claude, with the judged files and traces committed; a claim about the judge that matches its interval (17 agreements in 20 claims has an interval of about 0.64 to 0.95, so "the judge is right 85% of the time" says more than 20 claims can show); and where the disagreements sit in the 3 by 3 table, with one or two of them read closely.
+
+### 3. Cost and latency
+
+Every Claude call you made is in a trace in `traces/`, with its tokens and how long it took.
+This option asks whether a cheaper setup is good enough.
+
+1. Run one cheaper variant on the practice queries, and commit it with its trace.
+   Two that work well: the reranker over 10 candidates instead of 20 (copy `p2/retrievers/rerank.py` to `rerank_c10.py`, change the number of candidates, and run `uv run p2 run --corpus shared --queries practice --system rerank_c10`, 20 calls), or, if you answered with `rerank`, answering the 12 questions with `hybrid` (`uv run p2 answer --corpus shared --system hybrid`, 12 calls).
+2. Run `uv run p2 score`.
+   The `stretch-cost` table adds up every trace (calls, saved replies, input and output tokens, seconds, and the same per query), then lists every pair of systems on the same queries where at least one calls Claude, the cheaper one first, with the difference in MRR@10 and its paired interval next to the input tokens and seconds per query the cheaper one saves.
+   Answers files on the same questions get the same comparison, on the share of questions whose `p2 verify` line is a PASS.
+   If you want nDCG@10 instead of MRR@10, rename the block to `stretch-cost-ndcg` in both of its marker lines in `EVAL.md`.
+   The table also lists the seconds of the systems that do not call Claude, from `traces/retrieval/` on your machine; git ignores that folder, so `p2 check` leaves that part out.
+
+**What you hand in:** the cheaper variant's run file or answers file with its trace, the `stretch-cost` table, and the five things in `EVAL.md` section 8.
+**What earns the 25 points:** the cost table for your own runs, one cheaper variant run on the practice queries and committed with its trace, and a judgment with numbers: what the variant saves per query, what it costs in quality with its interval, and whether you would make that trade, and for what use.
+
+### 4. A second ablation, of a different kind
+
+Your core ablation changed one thing; this one changes a thing of a different kind, so you learn about a second part of the pipeline.
+The kinds are chunking; text processing or the tokenizer; the embedding model; the fusion method or its weights; and the reranker's candidates or passage length.
+If your first ablation changed the tokenizer, for example, the second cannot be another tokenizer, but it can be the chunk size.
+
+1. Write the hypothesis first, in `EVAL.md` section 8, in one sentence with a direction, and commit it before you run anything.
+2. Make the variant its own system, as for the first ablation, and name the system it varies: add a line such as `BASE = "dense"` to the variant's file, or start the file's name with it, since `dense_potion.py` varies `dense` by the part of its name before the underscore.
+3. Run it with `--ablation`, then `uv run p2 score`.
+   The `own-ablation` table gives its intervals against every system, and the `own-ablation-queries` table lists the queries it helped and hurt against the system it varies, with the reciprocal rank on each side.
+
+**What you hand in:** the hypothesis in `EVAL.md` section 8, committed before the run, the variant's file in `p2/retrievers/` and its run in `runs/own/ablation/`, the `own-ablation` and `own-ablation-queries` tables in `EVAL.md` section 5, and the five things in section 8.
+**What earns the 25 points:** a second ablation of a different kind, its hypothesis committed before its run, its interval read honestly, and a look at the queries: read the two it helped most and the two it hurt most, and say whether your hypothesis explains them.
+
+### 5. The grep agent from lab 12
+
+In lab 12 you ran Claude Code itself as a retriever, searching the corpus with only the Grep, Glob and Read tools.
+Here you put that agent beside your four systems on your own corpus.
+
+1. Ask Claude Code to port `class/12-embeddings-and-retrieval/lab/starter/agent_search.py` from the course repo into `p2/retrievers/agent.py`, with `NEEDS_CLAUDE = True`.
+   Its `search(text, k)` makes one call per query with `p2.claude.call(prompt, schema, model=cfg.model, cache_dir=claude.cache_folder(cfg), tools=claude.AGENT_TOOLS, cwd=paths.docs_dir(cfg.root, corpus.name))`, which runs `claude -p` inside `corpora/own/docs/` with those three tools and nothing else, saves the reply, and records the tokens in the trace; the docstring of `p2/claude.py` explains it.
+   The lab's schema returns up to 5 document ids; ask for up to 10, and drop any id that is not a document of your corpus.
+   The agent sometimes replies with a path or a file name instead of an id, especially on Windows, so keep only the last part of each path and remove `.md` before that check.
+2. Copy 10 lines of `eval/own/queries.tsv` into `eval/own/agent.queries.tsv`, a mix of classes and of both origins.
+3. Try 2 of them first: put two lines in `.cache/agent2.tsv` and run `uv run p2 run --corpus own --queries .cache/agent2.tsv --system agent`, which writes to `.cache/extra/` and prints the input tokens per query.
+4. Then run all 10: `uv run p2 run --corpus own --queries eval/own/agent.queries.tsv --system agent --stretch`, which reuses the two saved replies and writes `runs/own/stretch/agent.trec` and `traces/own-stretch-agent.jsonl`.
+   Commit both, because `p2 check` checks the run against its trace, as it does for `rerank`.
+   `--stretch` refuses a line that is not in your gold set, so the agent's scores can be compared with your other runs.
+5. Run `uv run p2 score`.
+   The `stretch-agent` table shows the agent and your four systems on those 10 queries, with recall@10, MRR@10, nDCG@10 and the Claude input tokens and seconds per query, and the paired interval of the agent against each system.
+
+**The cost, in plain numbers.**
+This is the most expensive option.
+In lab 12 the agent read about 54,000 input tokens per query inside the course repo, on 260 short articles, and the course's `CLAUDE.md` files, which Claude Code reads in the folder it runs in and in every folder above it, were 9,000 to 16,000 of those.
+`p2` runs the agent on a fresh copy of your documents outside your repo, so it loads no `CLAUDE.md` and cannot open your gold set, which keeps the comparison honest and every call a little cheaper.
+On a corpus of 271 USGS chapters it read about 40,000 per query in my test, outside the course repo, and my research measured 120,000 to 245,000 per question on a corpus of 5,183 abstracts.
+So 10 queries on your corpus can be half a million to two and a half million input tokens, more than a full reranker pass over all your own queries.
+Try 2 queries first, look at the input tokens per query that `p2 run` prints, and spread the rest over more than one day if you need to.
+
+**What you hand in:** `p2/retrievers/agent.py`, `eval/own/agent.queries.tsv`, `runs/own/stretch/agent.trec` with `traces/own-stretch-agent.jsonl`, the `stretch-agent` table, and the five things in `EVAL.md` section 8.
+**What earns the 25 points:** the agent run on 10 of your own queries, committed with its trace; its comparison with the four systems on the same queries; and a judgment on quality per token: with 10 queries most intervals include zero, so say what 10 queries can and cannot show, and what the agent would cost on your whole gold set.
+
+### 6. Do model-written queries favor keyword search?
+
+A query a model drafts from a document tends to copy that document's words, which is exactly what keyword search rewards.
+This option tests that on your own gold set.
+
+1. Have at least 20 judged queries with `origin` `hand` and at least 20 with `origin` `claude` in `eval/own/`, judged by the same relevance rule.
+   That is 10 more hand-written queries than the core asks for, or more if you have fewer than 20 drafted ones.
+2. Write your prediction in `EVAL.md` section 8 before you score: will `bm25`'s lead over `dense` be larger on the claude queries, and by about how much?
+3. Run your systems again (`uv run p2 run --all --with-claude` asks before the reranker's calls), then `uv run p2 score`.
+   The `own-origins` table in `EVAL.md` section 4 shows each system's mean on each group and the difference, hand minus claude, with a 95% interval from resampling the queries within each group.
+   Below it is the number that answers the question, `bm25` minus `dense` on the claude queries minus the same on the hand queries, with its interval, and the mean content-word overlap of each group: the share of a query's content words that its best relevant document contains, which is the likely mechanism.
+   For comparison, that overlap is 0.95 for the shared practice set's identifier queries, 0.11 for its paraphrases and 0.51 for its mixed queries.
+
+**What you hand in:** at least 20 judged `hand` and 20 judged `claude` queries in `eval/own/`, your prediction in `EVAL.md` section 8, committed before you scored, the `own-origins` table in `EVAL.md` section 4, and the five things in section 8.
+**What earns the 25 points:** at least 20 judged queries of each origin, the prediction written first, the interval of the interaction read honestly, and the overlap used as evidence for or against the mechanism, along with what else differs between your two groups, such as their classes and their length.
+
+---
+
 ## How the 150 points are planned
 
 This is how I plan to grade.
@@ -420,13 +547,13 @@ Canvas is the record, and if I change this table before the deadline I will anno
 | Failure analysis | 10 | at least five failures, read and sorted by cause |
 | Cross-corpus comparison | 10 | whether the winner changed and a tested or honestly labeled explanation |
 | `DECISIONS.md` | 5 | five prompts answered in your own words, with specifics |
-| One stretch | 25 | 498E: any one of the options below; 598E: the rider, required |
+| One stretch | 25 | 498E: one of the six options in "One stretch" above, each graded the same way; 598E: the rider, required |
 
 That is 55 points for stage 1, 45 for stage 2, 25 for the analysis and 25 for the stretch.
 The hidden test queries are graded as complete and reproducible only, and their score is feedback.
 
-The stretch options for 498E are the 598E rider; a claim-level faithfulness check with `claude -p` plus a calibration where you check 20 claims by hand; traces from `traces/` opened in Phoenix, an open-source viewer for model traces, with one finding; a second ablation; or the agent-with-grep arm from lab 12 on 10 queries, with its cost.
-Name your stretch in `EVAL.md` section 8.
+For 598E the rider is the stretch: you do not do the other options, and doing one as well adds no points, because the project is capped at 150.
+Whichever stretch you do, write it up in `EVAL.md` section 8.
 
 I would rather say this now than have you find out later: without a stretch, the most this project can reach is 125 of 150, and with the video it is 175 of 200.
 That is 87.5% on this project, so here an A needs a stretch.
@@ -477,14 +604,14 @@ If Canvas and this file ever disagree, Canvas wins, and please tell me so I can 
   You never need an API key in this project, because `claude -p` uses your Claude Code sign-in.
 - **Commit only text you may publish**, with its license recorded.
 - **The numbers must come from your code.**
-  Run files, their traces, answers files, `results/results.json` and the tables in `EVAL.md` are written by commands.
+  Run files, their traces, answers files, judged files, `results/results.json` and the tables in `EVAL.md` are written by commands.
   `p2 check` runs your systems again, checks the reranker's runs against their traces, and recomputes the scores and tables, and I also run your retrievers on documents you have not seen and score your test runs.
   Do not edit those files by hand, and do not hard-code answers.
-- **Write the judgment parts yourself:** your `hand` queries, your relevance labels, `DECISIONS.md`, the prose in `EVAL.md`, and `PREREG.md`.
+- **Write the judgment parts yourself:** your `hand` queries, your relevance labels, `DECISIONS.md`, the prose in `EVAL.md`, `PREREG.md`, and for stretch option 2 your verdicts in the calibration file.
   The agent can find candidates and explain numbers.
 - **Tune on the practice queries, never on the test queries.**
   You cannot see the test judgments, so the test score is the honest check on whether your pipeline generalizes.
-- **What to edit and what not to:** the three retrievers, `prompts/answer.txt`, `p2.toml`, your corpus and gold set, and your own writing are yours.
+- **What to edit and what not to:** the three retrievers and any system you add, `prompts/answer.txt`, `prompts/judge.txt`, `p2.toml`, your corpus and gold set, and your own writing are yours.
   The rest of `p2/`, `tests/`, the shared corpus and queries, the workflows, and the license skill belong to the course, and the instructor's copy of the checker is what grades you, so changing yours cannot help.
   `CLAUDE.md` has the exact list.
   If you think one of those files has a bug, tell me; that is a bug too, and I would rather fix it for everyone.

@@ -42,3 +42,22 @@ def test_paired_bootstrap_is_deterministic_and_sensible():
 def test_sd():
     assert stats.sd([1.0]) == 0.0
     assert stats.sd([0.0, 2.0]) == pytest.approx(2**0.5)
+
+
+def test_unpaired_bootstrap_resamples_each_group_on_its_own():
+    hand = [1.0, 0.5, 0.0, 1.0, 0.333, 0.25]
+    claude = [1.0, 1.0, 0.5, 1.0, 1.0, 0.5, 1.0, 0.0]
+    first = stats.unpaired_bootstrap(hand, claude)
+    assert first == stats.unpaired_bootstrap(hand, claude)  # seed 0, so the same every time
+    assert (first["n_a"], first["n_b"]) == (6, 8)
+    assert first["mean_diff"] == pytest.approx(sum(hand) / 6 - sum(claude) / 8)
+    lo, hi = first["ci95"]
+    assert lo < first["mean_diff"] < hi
+    # Two groups with no spread inside them: every resample gives the same difference.
+    flat = stats.unpaired_bootstrap([0.75] * 5, [0.25] * 9)
+    assert flat["mean_diff"] == pytest.approx(0.5) and flat["ci95"] == pytest.approx([0.5, 0.5])
+    # A clear gap reads as one group higher; groups of different sizes are fine.
+    gap = stats.unpaired_bootstrap([0.9, 1.0, 0.8, 0.95, 0.85], [0.1, 0.0, 0.2, 0.15, 0.05, 0.1, 0.0])
+    assert stats.reading(gap["ci95"], "hand", "claude") == "hand higher"
+    with pytest.raises(ValueError):
+        stats.unpaired_bootstrap([], [1.0])

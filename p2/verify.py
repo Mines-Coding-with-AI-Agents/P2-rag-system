@@ -45,6 +45,7 @@ class Totals:
     claims: int = 0
     claims_verified: int = 0
     lines: list[str] = field(default_factory=list)
+    passed: dict[str, bool] = field(default_factory=dict)  # qid: True when its line is a PASS
 
     def as_dict(self) -> dict:
         return {
@@ -133,6 +134,7 @@ def evaluate(data: dict, chunks: dict[str, str], label: str = "?") -> Totals:
         if r.get("error"):
             problems.append(f"the call failed: {r['error']}")
         status = "PASS" if not problems else "FAIL"
+        t.passed[str(r.get("qid", "?"))] = not problems
         what = "not_found" if r.get("not_found") else f"{len(claims)} claim" + ("" if len(claims) == 1 else "s")
         t.lines.append(f"{r.get('qid', '?'):<5} {kind:<4} {status} {what}" + (": " + "; ".join(problems) if problems else ""))
     return t
@@ -153,7 +155,7 @@ def mechanics(data: dict, chunks: dict[str, str]) -> list[str]:
 
 
 def latest_answers(root: Path) -> Path | None:
-    found = sorted((root / "answers").glob("*/*.json"), key=lambda p: p.stat().st_mtime)
+    found = sorted(paths.answers_files(root), key=lambda p: p.stat().st_mtime)
     return found[-1] if found else None
 
 
