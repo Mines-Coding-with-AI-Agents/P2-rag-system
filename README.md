@@ -5,16 +5,16 @@
 | | |
 |---|---|
 | **Weight** | 20% of your final grade |
-| **Points** | 150 for this project, plus 50 for a video, both on Canvas |
+| **Points** | 200 on Canvas: 150 for this project and 50 for a video, handed in together in one discussion post |
 | **Released** | Tuesday, October 6 (lecture 12) |
 | **Due** | Tuesday, October 27, 11:59 pm, one deadline for everything |
 | **Work** | Individual; 598E adds a rider (below) |
 
 You hand in three things:
 
-1. A **public GitHub repo** made from this template, whose URL you submit on Canvas.
+1. A **public GitHub repo** made from this template, whose URL you post in the Project 2 discussion on Canvas.
 2. The **work inside it**: three retrievers you built, run files and answers you generated, your own corpus and gold set, `EVAL.md` and `DECISIONS.md` written in your own words, and for 598E a `PREREG.md`.
-3. A **5 to 10 minute video**, submitted on Canvas as its own assignment.
+3. A **5 to 10 minute video**, in the same discussion post.
 
 ---
 
@@ -563,7 +563,7 @@ The stretch is worth doing properly and not worth doing in the last hour.
 
 ## The video
 
-The video is a separate assignment on Canvas, worth 50 points.
+The video is worth 50 points, and it goes in the same Canvas discussion post as your repo URL.
 Record 5 to 10 minutes, with any tool and any quality; a phone or a screen recording with your voice over it is fine.
 Cover three things, in whatever order feels natural:
 
@@ -585,8 +585,8 @@ I care about the story and not about production quality.
 
 Everything is due **Tuesday, October 27, at 11:59 pm**.
 There are no checkpoints, because I would rather you finish the whole thing by the deadline than turn something in halfway.
-On Canvas you submit the URL of your repo for the project, and the video as its own assignment.
-Push your last commit before you submit.
+On Canvas you make one post in the Project 2 discussion, with the URL of your repo and your video.
+Push your last commit before you post.
 
 Late work loses 20%, and nothing is accepted more than a week late.
 Canvas is the system of record for the deadline.
