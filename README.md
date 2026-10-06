@@ -490,7 +490,7 @@ In lab 12 you ran Claude Code itself as a retriever, searching the corpus with o
 Here you put that agent beside your four systems on your own corpus.
 
 1. Ask Claude Code to port `class/12-embeddings-and-retrieval/lab/starter/agent_search.py` from the course repo into `p2/retrievers/agent.py`, with `NEEDS_CLAUDE = True`.
-   Its `search(text, k)` makes one call per query with `p2.claude.call(prompt, schema, model=cfg.model, cache_dir=claude.cache_folder(cfg), tools=claude.AGENT_TOOLS, cwd=paths.docs_dir(cfg.root, corpus.name))`, which runs `claude -p` inside `corpora/own/docs/` with those three tools and nothing else, saves the reply, and records the tokens in the trace; the docstring of `p2/claude.py` explains it.
+   Its `search(text, k)` makes one call per query with `p2.claude.call(prompt, schema, model=cfg.model, cache_dir=claude.cache_folder(cfg), tools=claude.AGENT_TOOLS, cwd=paths.docs_dir(cfg.root, corpus.name))`, which runs `claude -p` on a fresh copy of `corpora/own/docs/` outside your repo, with those three tools fenced to that copy and nothing else, saves the reply, and records the tokens in the trace; the docstring of `p2/claude.py` explains it.
    The lab's schema returns up to 5 document ids; ask for up to 10, and drop any id that is not a document of your corpus.
    The agent sometimes replies with a path or a file name instead of an id, especially on Windows, so keep only the last part of each path and remove `.md` before that check.
 2. Copy 10 lines of `eval/own/queries.tsv` into `eval/own/agent.queries.tsv`, a mix of classes and of both origins.
