@@ -459,10 +459,10 @@ def test_an_interrupted_run_still_leaves_a_manifest_row_for_every_document_writt
     (src / "b.md").write_text("# B\n\n" + " ".join(words(12, 60)), encoding="utf-8", newline="\n")
     real = ingest.process_file
 
-    def interrupt_on_b(path, rel, docid):
+    def interrupt_on_b(path, rel, docid, *rest):
         if rel == "b.md":
             raise KeyboardInterrupt
-        return real(path, rel, docid)
+        return real(path, rel, docid, *rest)
 
     monkeypatch.setattr(ingest, "process_file", interrupt_on_b)
     with pytest.raises(KeyboardInterrupt):
@@ -476,10 +476,10 @@ def test_a_failure_while_cleaning_one_file_is_reported_and_the_others_are_added(
     (src / "b.md").write_text("# B\n\n" + " ".join(words(14, 60)), encoding="utf-8", newline="\n")
     real = ingest.build_units
 
-    def explode_on_b(docid, rel, extracted, kind):
+    def explode_on_b(docid, rel, extracted, kind, *rest):
         if rel == "b.md":
             raise ValueError("something odd in this file")
-        return real(docid, rel, extracted, kind)
+        return real(docid, rel, extracted, kind, *rest)
 
     monkeypatch.setattr(ingest, "build_units", explode_on_b)
     assert ingest.run(args_for(src, repo)) == 0
@@ -933,3 +933,194 @@ def test_a_missing_folder_says_where_it_looked(repo, capsys, monkeypatch):
     assert ingest.run(args_for("work/p2-raw", repo)) == 1
     out = capsys.readouterr().out
     assert "I looked for" in out and "../p2-raw" in out
+
+
+# ---------------------------------------------------------------------------
+# --part-pages: long PDFs as parts of N pages, so a corpus of long papers can reach 200 documents
+# ---------------------------------------------------------------------------
+
+
+def paged_pdf(seed: int, n_pages: int, title: str | None = None) -> bytes:
+    """n_pages of 600 words each (50 lines of 12), every page's first line unique to it."""
+    return build_pdf([sentence_lines(seed + p, 50, 12) for p in range(n_pages)], title=title)
+
+
+def first_line_of_page(seed: int, page: int) -> str:
+    return sentence_lines(seed + page - 1, 50, 12)[0]
+
+
+@pytest.mark.parametrize(
+    "pages,per_part,expected",
+    [
+        (5, 5, [(1, 5)]),
+        (6, 5, [(1, 6)]),  # a one-page remainder joins the part before it
+        (7, 5, [(1, 5), (6, 7)]),
+        (11, 5, [(1, 5), (6, 11)]),
+        (12, 5, [(1, 5), (6, 10), (11, 12)]),
+        (15, 5, [(1, 5), (6, 10), (11, 15)]),
+        (3, 1, [(1, 1), (2, 2), (3, 3)]),
+        (10, 3, [(1, 3), (4, 6), (7, 10)]),
+        (25, 10, [(1, 10), (11, 20), (21, 25)]),  # the default size, unchanged
+    ],
+)
+def test_page_blocks_with_a_part_size(pages, per_part, expected):
+    assert ingest.page_blocks(pages, per_part) == expected
+
+
+def test_the_shortest_remainder_scales_with_the_part_size():
+    assert ingest.min_last_part(ingest.PAGES_PER_PART) == ingest.MIN_LAST_PART_PAGES == 4
+    assert [ingest.min_last_part(n) for n in (1, 2, 3, 5, 20)] == [1, 1, 2, 2, 8]
+
+
+@needs_pypdf
+def test_without_part_pages_a_long_paper_stays_whole(repo, src):
+    (src / "Paper.pdf").write_bytes(paged_pdf(5000, 12))  # 12 pages, 7,200 words: under the 15,000-word split
+    assert ingest.run(args_for(src, repo)) == 0
+    assert doc_ids(repo) == ["paper"]
+
+
+@needs_pypdf
+def test_part_pages_splits_every_pdf_longer_than_n_pages(repo, src, capsys):
+    (src / "Paper.pdf").write_bytes(paged_pdf(5000, 12, title="A paper about pumps"))
+    (src / "short.pdf").write_bytes(paged_pdf(5100, 4))
+    (src / "six.pdf").write_bytes(paged_pdf(5200, 6))  # the one-page remainder is too short to be a part
+    (src / "notes.md").write_text("# Notes\n\n" + " ".join(words(5300, 300)), encoding="utf-8", newline="\n")
+    assert ingest.run(args_for(src, repo, part_pages=5, source="Example lab")) == 0
+    assert doc_ids(repo) == ["notes", "paper__p001-005", "paper__p006-010", "paper__p011-012", "short", "six"]
+    rows = {r[0]: r for r in manifest_rows(repo)}
+    assert rows["paper__p006-010"][1] == "A paper about pumps (pages 6-10)"
+    assert rows["paper__p006-010"][4] == "file: Paper.pdf; pages 6-10 of 12"
+    assert rows["short"][4] == "file: short.pdf; 4 pages" and rows["six"][4] == "file: six.pdf; 6 pages"
+    assert all(r[2] == "Example lab" for r in rows.values())
+    middle = doc_text(repo, "paper__p006-010")
+    assert first_line_of_page(5000, 6) in middle and first_line_of_page(5000, 10) in middle
+    assert first_line_of_page(5000, 5) not in middle and first_line_of_page(5000, 11) not in middle
+    assert "in 3 parts" in capsys.readouterr().out
+
+
+@needs_pypdf
+def test_part_pages_also_cuts_a_pdf_over_the_word_split_into_its_own_size(repo, src):
+    pages = [sentence_lines(5400 + p, 50, 14) for p in range(25)]  # 17,500 words: 10-page parts without the option
+    (src / "big.pdf").write_bytes(build_pdf(pages))
+    ingest.run(args_for(src, repo, part_pages=5))
+    assert doc_ids(repo) == [f"big__p{a:03d}-{b:03d}" for a, b in [(1, 5), (6, 10), (11, 15), (16, 20), (21, 25)]]
+
+
+@pytest.mark.parametrize("value", [0, -3, True, "5"])
+def test_part_pages_needs_a_whole_number_of_pages(repo, src, capsys, value):
+    (src / "notes.md").write_text("# Notes\n\nSome text.\n", encoding="utf-8", newline="\n")
+    assert ingest.run(args_for(src, repo, part_pages=value)) == 1
+    assert "--part-pages takes a whole number of pages" in capsys.readouterr().out
+    assert not (corpus(repo) / "docs").exists()
+
+
+def test_the_cli_and_the_module_parse_part_pages():
+    from p2 import cli
+
+    args = cli.parser().parse_args(["ingest", "../p2-raw", "--part-pages", "5", "--license", "cc-by-4.0"])
+    assert args.part_pages == 5 and args.src_dir == "../p2-raw"
+    assert cli.parser().parse_args(["ingest", "../p2-raw"]).part_pages is None
+    parser = argparse.ArgumentParser()
+    ingest.add_arguments(parser)
+    assert parser.parse_args(["raw", "--part-pages", "3"]).part_pages == 3
+
+
+@needs_pypdf
+def test_a_file_ingested_whole_is_not_added_again_as_parts(repo, src, capsys):
+    (src / "Paper.pdf").write_bytes(paged_pdf(5500, 12))
+    ingest.run(args_for(src, repo))
+    assert doc_ids(repo) == ["paper"]
+    capsys.readouterr()
+
+    assert ingest.run(args_for(src, repo, part_pages=5)) == 0
+    out = capsys.readouterr().out
+    assert doc_ids(repo) == ["paper"] and len(manifest_rows(repo)) == 1
+    assert "Paper.pdf -> not added: its text is already in the corpus as paper, cut into documents another way" in out
+    assert "1 file(s) are already in the corpus, cut into documents another way" in out
+    assert "corpora/own/docs/" in out and "corpora/own/manifest.tsv" in out
+    report = (corpus(repo) / "INGEST.md").read_text(encoding="utf-8")
+    assert "- `Paper.pdf`: Its text is already in the corpus, cut into documents another way, as `paper`, so it was not added again." in report
+
+    # once the whole document and its row are gone, the same run cuts it into parts under the same name
+    (corpus(repo) / "docs" / "paper.md").unlink()
+    (corpus(repo) / "manifest.tsv").write_text("docid\ttitle\tsource\tlicense\tnotes\n", encoding="utf-8", newline="\n")
+    ingest.run(args_for(src, repo, part_pages=5))
+    assert doc_ids(repo) == ["paper__p001-005", "paper__p006-010", "paper__p011-012"]
+
+
+@needs_pypdf
+def test_parts_are_not_added_again_whole_or_in_another_size(repo, src, capsys):
+    (src / "Paper.pdf").write_bytes(paged_pdf(5600, 15))
+    ingest.run(args_for(src, repo, part_pages=5))
+    before = doc_ids(repo)
+    assert len(before) == 3
+    for size in (None, 3, 10):
+        capsys.readouterr()
+        ingest.run(args_for(src, repo, part_pages=size))
+        assert doc_ids(repo) == before and len(manifest_rows(repo)) == 3
+        assert "cut into documents another way" in capsys.readouterr().out
+    report = (corpus(repo) / "INGEST.md").read_text(encoding="utf-8")
+    assert "as `paper__p001-005`, `paper__p006-010`, `paper__p011-015`, so it was not added again" in report
+
+
+@needs_pypdf
+def test_rerunning_the_same_part_size_adds_nothing_and_restores_a_lost_part(repo, src, capsys):
+    (src / "Paper.pdf").write_bytes(paged_pdf(5700, 15))
+    ingest.run(args_for(src, repo, part_pages=5))
+    ingest.run(args_for(src, repo, part_pages=5))
+    assert len(doc_ids(repo)) == 3 and len(manifest_rows(repo)) == 3
+
+    # an interrupted run that lost the last part: the next run adds only that part, and is not taken for a re-cut
+    (corpus(repo) / "docs" / "paper__p011-015.md").unlink()
+    rows = (corpus(repo) / "manifest.tsv").read_text(encoding="utf-8").splitlines()
+    (corpus(repo) / "manifest.tsv").write_text("\n".join(r for r in rows if not r.startswith("paper__p011-015")) + "\n", encoding="utf-8", newline="\n")
+    capsys.readouterr()
+    ingest.run(args_for(src, repo, part_pages=5))
+    out = capsys.readouterr().out
+    assert "cut into documents another way" not in out and "2 part(s) were already in the corpus" in out
+    assert len(doc_ids(repo)) == 3
+    texts = [doc_text(repo, d) for d in doc_ids(repo)]
+    assert sum(first_line_of_page(5700, 11) in t for t in texts) == 1
+
+
+@needs_pypdf
+def test_a_different_file_with_the_same_name_is_still_added(repo, tmp_path):
+    first, second = tmp_path / "2024", tmp_path / "2025"
+    first.mkdir()
+    second.mkdir()
+    (first / "chapter.pdf").write_bytes(paged_pdf(5800, 12))
+    (second / "chapter.pdf").write_bytes(paged_pdf(5900, 12))
+    ingest.run(args_for(first, repo))
+    ingest.run(args_for(second, repo, part_pages=5))
+    assert doc_ids(repo) == ["chapter", "chapter-2__p001-005", "chapter-2__p006-010", "chapter-2__p011-012"]
+
+
+@needs_pypdf
+def test_under_the_floor_with_long_pdfs_the_summary_suggests_part_pages(repo, src, capsys):
+    (src / "Paper.pdf").write_bytes(paged_pdf(6000, 12))
+    ingest.run(args_for(src, repo))
+    out = capsys.readouterr().out
+    assert "so 199 more to go" in out
+    assert "This run read 1 PDF(s) longer than 5 pages" in out and "--part-pages 5" in out
+    (corpus(repo) / "docs" / "paper.md").unlink()
+    (corpus(repo) / "manifest.tsv").write_text("docid\ttitle\tsource\tlicense\tnotes\n", encoding="utf-8", newline="\n")
+    ingest.run(args_for(src, repo, part_pages=5))
+    out = capsys.readouterr().out
+    assert "so 197 more to go" in out and "--part-pages" not in out
+
+
+def test_ingest_md_and_the_summary_state_the_size_rules(repo, src, capsys, monkeypatch):
+    (src / "notes.md").write_text("# Notes\n\n" + " ".join(words(6100, 300)), encoding="utf-8", newline="\n")
+    ingest.run(args_for(src, repo))
+    report = (corpus(repo) / "INGEST.md").read_text(encoding="utf-8")
+    assert "- Documents: 1 (the final check needs at least 200)" in report
+    assert "(`p2 check` warns above 800,000 and fails above 1,000,000)" in report
+    out = capsys.readouterr().out
+    assert "Heads up" not in out and "above the limit" not in out
+
+    monkeypatch.setattr(ingest, "TOKEN_WARNING", 10)
+    ingest.run(args_for(src, repo))
+    assert "Heads up: that is above 10 tokens, near the limit of 1,000,000" in capsys.readouterr().out
+    monkeypatch.setattr(ingest, "TOKEN_LIMIT", 20)
+    ingest.run(args_for(src, repo))
+    assert "above the limit of 20 tokens, so `p2 check` will fail, because CI could not encode the corpus within its 45 minutes" in capsys.readouterr().out

@@ -24,7 +24,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The first run that checks dense runs on a corpus encodes that corpus once: about 3 to 7 minutes for
+    # the shared corpus, and up to about twice that for your own near its 1,000,000-token limit. Later
+    # runs reuse the caches below and take under a minute.
+    timeout-minutes: 45
     env:
       # The embedding models live inside the workspace, so the cache steps can see whether they exist.
       HF_HOME: ${{ github.workspace }}/.cache/huggingface

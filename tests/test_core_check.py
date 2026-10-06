@@ -448,10 +448,26 @@ def test_corpus_over_the_token_limit_fails_and_a_stale_ingest_report_is_a_todo(t
     (root / "corpora" / "own" / "INGEST.md").write_text("# Ingest report\n\n- Documents: 4\n\n| `doc-0` | 6 | - | - | - |\n| `doc-9` | 6 | - | - | - |\n", encoding="utf-8", newline="\n")
     monkeypatch.setattr(check, "OWN_TOKEN_LIMIT", 10)
     items = {i.what: i for i in statuses(root)}
-    size = items["own corpus size (at most 25 MB, 10 MB per file and about 500,000 tokens)"]
-    assert size.status == "FAIL" and "above the limit of 10" in size.detail
+    size = items[check.OWN_SIZE_ITEM]
+    assert size.status == "FAIL" and "above the limit of 10" in size.detail and "45 minutes" in size.detail
     report = items["corpora/own/INGEST.md describes the documents in docs/"]
     assert report.status == "TODO" and "doc-9" in report.detail and "p2 ingest --report" in report.detail
+
+
+def test_a_corpus_near_the_token_limit_passes_with_a_note_and_a_small_one_gets_the_part_pages_hint(tmp_path, monkeypatch):
+    root = make_repo(tmp_path)
+    docs = root / "corpora" / "own" / "docs"
+    rows = ["docid\ttitle\tsource\tlicense\tnotes"]
+    for i in range(3):
+        (docs / f"doc-{i}.md").write_text(f"# Doc {i}\n\nPumps and valves, part {i}.\n", encoding="utf-8", newline="\n")
+        rows.append(f"doc-{i}\tDoc {i}\tmy notes\town-work\t")
+    (root / "corpora" / "own" / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr(check, "OWN_TOKEN_WARNING", 10)
+    items = {i.what: i for i in statuses(root)}
+    size = items[check.OWN_SIZE_ITEM]
+    assert size.status == "PASS" and "near the limit of 1,000,000" in size.detail and "15 minutes, once" in size.detail
+    floor = items["own corpus has at least 200 documents"]
+    assert floor.status == "TODO" and floor.detail.startswith("it has 3;") and "--part-pages 5" in floor.detail
 
 
 def test_an_answers_file_with_a_failed_call_is_not_complete(tmp_path, monkeypatch):

@@ -3,6 +3,7 @@
     uv sync --group ingest
     uv run p2 ingest ../p2-raw --license cc-by-4.0 --source "arXiv, CC BY papers"
     uv run p2 ingest ../p2-raw/2024 --license us-gov-public-domain --source "https://pubs.usgs.gov/periodicals/mcs2024/{name}"
+    uv run p2 ingest ../p2-raw --part-pages 5 --license cc-by-4.0 --source "..."   long PDFs as 5-page parts
     uv run p2 ingest --report      rewrite INGEST.md after you removed documents by hand
 
 What it does, in order:
@@ -18,11 +19,16 @@ What it does, in order:
    and drops a trailing reference list.
 3. Splits a document of more than about 15,000 words into parts of about 10 pages and puts the page range in the id,
    for example `nasa-handbook__p041-050`, because a 300-page handbook is relevant to every query and so says nothing about any one of them.
+   With --part-pages N, every PDF longer than N pages is split into parts of N pages instead, whatever its length in words,
+   with the same kind of id; each part counts as a document, which is how a corpus of long papers reaches the 200-document floor
+   while staying under the token limit (p2/limits.py has the arithmetic). Web pages and text files are not affected.
 4. Gives each document an id built from its file name, for example `Taylor 1994 - TN1297.pdf` becomes `taylor-1994-tn1297`,
    and a title from the PDF's metadata, the first heading or the first line; when several PDFs of one run share a
    metadata title (every chapter of a volume, say), each title starts with its file name.
    Ids use only lower-case letters, digits, dots, underscores and hyphens, and an id never changes once your qrels mention it.
 5. Skips a document whose normalized text is identical to one already in the corpus, so running ingest twice on the same folder adds nothing the second time.
+   A file whose text is already in the corpus cut another way (ingested whole before, and now with --part-pages, say)
+   is skipped too, with the ids to remove first if you want it split again.
 6. Writes `corpora/<into>/docs/<docid>.md`, appends one row per document to `corpora/<into>/manifest.tsv`
    (license from --license, or `unknown` until you fix it; source from --source, where {name} and {stem}
    stand for each file's name, or the file name),
@@ -41,12 +47,15 @@ from __future__ import annotations
 import collections
 import hashlib
 import logging
+import math
 import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
+
+from p2 import limits
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -64,9 +73,11 @@ VERY_SHORT_WORDS = 50
 MAX_ID_LENGTH = 64
 RUNNING_LINE_SHARE = 0.3  # a line at the edge of at least 30 percent of the pages is furniture
 RUNNING_LINE_EDGE = 3  # the first and last three non-empty lines of a page count as its edge
-TOKENS_PER_WORD = 1.4
-TOKEN_WARNING = 500_000
-TOKEN_LIMIT = 600_000  # p2 check fails above this
+TOKENS_PER_WORD = limits.TOKENS_PER_WORD
+TOKEN_WARNING = limits.OWN_TOKEN_WARNING
+TOKEN_LIMIT = limits.OWN_TOKEN_LIMIT  # p2 check fails above this
+MIN_DOCS = limits.OWN_MIN_DOCS
+MIN_ID_TEXT = 200  # a document shorter than this (normalized) is too short to recognize inside another file
 
 OFFICE_EXTENSIONS = {".doc", ".docx", ".ppt", ".pptx", ".odt", ".odp", ".rtf", ".pages", ".key"}
 SHEET_EXTENSIONS = {".xls", ".xlsx", ".csv", ".tsv", ".ods", ".numbers"}
@@ -323,10 +334,14 @@ def drop_reference_list(pages: list[str]) -> tuple[list[str], int, str]:
     return out, removed, how
 
 
+def normalized_text(text: str) -> str:
+    """The text lower-cased, with punctuation and whitespace runs as single spaces."""
+    return re.sub(r"\W+", " ", text.lower()).strip()
+
+
 def normalized_hash(text: str) -> str:
     """Hash of the lower-cased text with punctuation and whitespace ignored, for exact-duplicate detection."""
-    norm = re.sub(r"\W+", " ", text.lower()).strip()
-    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+    return hashlib.sha256(normalized_text(text).encode("utf-8")).hexdigest()
 
 
 def odd_glyph_flags(text: str) -> list[str]:
@@ -429,11 +444,16 @@ def one_line(text: str, limit: int = 200) -> str:
     return " ".join(str(text).split())[:limit]
 
 
-def page_blocks(n_pages: int) -> list[tuple[int, int]]:
-    """Blocks of about 10 pages as (first, last) 1-based page numbers; a short remainder joins the last block."""
-    starts = list(range(1, n_pages + 1, PAGES_PER_PART))
-    blocks = [(s, min(s + PAGES_PER_PART - 1, n_pages)) for s in starts]
-    if len(blocks) > 1 and blocks[-1][1] - blocks[-1][0] + 1 < MIN_LAST_PART_PAGES:
+def min_last_part(per_part: int) -> int:
+    """The shortest remainder that stays a part of its own: 4 pages for 10-page parts, 2 for 5-page parts."""
+    return max(1, math.ceil(per_part * MIN_LAST_PART_PAGES / PAGES_PER_PART))
+
+
+def page_blocks(n_pages: int, per_part: int = PAGES_PER_PART) -> list[tuple[int, int]]:
+    """Blocks of per_part pages as (first, last) 1-based page numbers; a short remainder joins the last block."""
+    starts = list(range(1, n_pages + 1, per_part))
+    blocks = [(s, min(s + per_part - 1, n_pages)) for s in starts]
+    if len(blocks) > 1 and blocks[-1][1] - blocks[-1][0] + 1 < min_last_part(per_part):
         last = blocks.pop()
         blocks[-1] = (blocks[-1][0], last[1])
     return blocks
@@ -598,6 +618,7 @@ class FileResult:
     units: list[Unit] = field(default_factory=list)
     duplicates: list[tuple[str, str]] = field(default_factory=list)  # (docid that would have been, existing id)
     title: str = ""  # the title every unit's title starts with
+    pages: int = 0  # the page count of a PDF, 0 for unpaged files
 
 
 def clean_document(extracted: Extracted, kind: str) -> tuple[list[str], dict]:
@@ -652,8 +673,26 @@ def removed_license_lines(raw_pages: list[str], clean_pages: list[str]) -> list[
     return [f'{kind} "{line}"' for kind, line in found.items()]
 
 
-def build_units(docid: str, rel: str, extracted: Extracted, kind: str) -> tuple[list[Unit], str]:
-    """Clean one document and cut it into the units to be written. Returns (units, problem)."""
+def _page_parts(docid, title, pages, n_pages, per_part, cleaning, base_note) -> list[Unit]:
+    """A paged document as parts of per_part pages, each with its page range in the id: `report__p011-020`."""
+    units: list[Unit] = []
+    width = max(3, len(str(n_pages)))
+    for first, last in page_blocks(n_pages, per_part):
+        block = pages[first - 1 : last]
+        if not any(p.strip() for p in block):
+            continue
+        part_id = f"{docid}__p{first:0{width}d}-{last:0{width}d}"
+        note = f"{base_note}; pages {first}-{last} of {n_pages}"
+        units.append(_make_unit(part_id, f"{title} (pages {first}-{last})", block, last - first + 1, cleaning, note))
+    return units
+
+
+def build_units(docid: str, rel: str, extracted: Extracted, kind: str, part_pages: int | None = None) -> tuple[list[Unit], str]:
+    """Clean one document and cut it into the units to be written. Returns (units, problem).
+
+    part_pages (from --part-pages) splits a PDF longer than that many pages into parts of that many pages,
+    whatever its word count; without it, only documents over SPLIT_WORDS words are split.
+    """
     pages, info = clean_document(extracted, kind)
     cleaning = _describe_cleaning(info)
     n_pages = len(pages) if extracted.paged else 0
@@ -672,32 +711,32 @@ def build_units(docid: str, rel: str, extracted: Extracted, kind: str) -> tuple[
         # almost nothing came out of a PDF: not worth a document, and almost surely a scan
         return [], f"only {total_words} words from {n_pages} page(s), so this looks like a scan; see the OCR notes in INGEST.md"
 
-    if total_words <= SPLIT_WORDS:
-        return [_make_unit(docid, title, pages, n_pages, cleaning, base_note + (f"; {n_pages} pages" if n_pages else ""))], ""
+    def whole() -> list[Unit]:
+        return [_make_unit(docid, title, pages, n_pages, cleaning, base_note + (f"; {n_pages} pages" if n_pages else ""))]
 
-    units: list[Unit] = []
+    if part_pages and extracted.paged:
+        if len(page_blocks(n_pages, part_pages)) > 1:
+            return _page_parts(docid, title, pages, n_pages, part_pages, cleaning, base_note), ""
+        return whole(), ""  # not longer than part_pages, or only by a remainder too short to be a part of its own
+
+    if total_words <= SPLIT_WORDS:
+        return whole(), ""
+
     if extracted.paged and n_pages > PAGES_PER_PART:
-        width = max(3, len(str(n_pages)))
-        for first, last in page_blocks(n_pages):
-            block = pages[first - 1 : last]
-            if not any(p.strip() for p in block):
-                continue
-            part_id = f"{docid}__p{first:0{width}d}-{last:0{width}d}"
-            note = f"{base_note}; pages {first}-{last} of {n_pages}"
-            units.append(_make_unit(part_id, f"{title} (pages {first}-{last})", block, last - first + 1, cleaning, note))
-        return units, ""
+        return _page_parts(docid, title, pages, n_pages, PAGES_PER_PART, cleaning, base_note), ""
 
     parts = split_paragraphs("\n\n".join(pages))
     width = max(2, len(str(len(parts))))
     if len(parts) == 1:
         return [_make_unit(docid, title, pages, n_pages, cleaning, base_note)], ""
+    units: list[Unit] = []
     for n, part in enumerate(parts, 1):
         part_id = f"{docid}__part{n:0{width}d}"
         units.append(_make_unit(part_id, f"{title} (part {n} of {len(parts)})", [part], 0, cleaning, f"{base_note}; part {n} of {len(parts)}"))
     return units, ""
 
 
-def process_file(path: Path, rel: str, docid: str) -> FileResult:
+def process_file(path: Path, rel: str, docid: str, part_pages: int | None = None) -> FileResult:
     """Read and clean one file. Does not touch the corpus."""
     ext = path.suffix.lower()
     if ext in OFFICE_EXTENSIONS:
@@ -725,14 +764,14 @@ def process_file(path: Path, rel: str, docid: str) -> FileResult:
             extracted, kind = read_plain(path), "txt"
         else:
             return FileResult(rel, "unsupported", f"file type {ext or '(none)'} is not one ingest reads (it reads PDF, HTML, Markdown and plain text)")
-        units, problem = build_units(docid, rel, extracted, kind)
+        units, problem = build_units(docid, rel, extracted, kind, part_pages)
     except MissingDependency:
         raise
     except Exception as exc:  # noqa: BLE001 - report any failure against the file, keep going with the others
         return FileResult(rel, "error", f"{type(exc).__name__}: {one_line(exc, 160)}")
     if problem:
         return FileResult(rel, "empty", problem)
-    return FileResult(rel, "ok", units=units, title=extracted.title or docid)
+    return FileResult(rel, "ok", units=units, title=extracted.title or docid, pages=len(extracted.pages) if extracted.paged else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -778,18 +817,63 @@ def append_manifest(path: Path, rows: list[tuple[str, str, str, str, str]]) -> N
         fh.write(existing + "".join(line + "\n" for line in lines))
 
 
+def doc_body(path: Path) -> str:
+    """A corpus document's text without its `# title` line."""
+    text = path.read_text(encoding="utf-8")
+    head, _, rest = text.partition("\n")
+    return rest if head.startswith("# ") else text
+
+
 def existing_hashes(docs_dir: Path) -> dict[str, str]:
     """normalized hash of the body of every document already in the corpus -> its id"""
     seen: dict[str, str] = {}
     if not docs_dir.is_dir():
         return seen
     for p in sorted(docs_dir.glob("*.md")):
-        text = p.read_text(encoding="utf-8")
-        head, _, rest = text.partition("\n")
-        body = rest if head.startswith("# ") else text
+        body = doc_body(p)
         if body.strip():
             seen.setdefault(normalized_hash(body), p.stem)
     return seen
+
+
+def manifest_file_notes(path: Path) -> list[tuple[str, str]]:
+    """(docid, notes) for every manifest row whose notes start with ingest's `file: <path>`."""
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines()[1:]:
+        cells = line.split("\t")
+        if len(cells) >= 5 and cells[4].strip().startswith("file: "):
+            rows.append((cells[0].strip(), cells[4].strip()))
+    return rows
+
+
+def cut_another_way(path: Path, units: list[Unit], file_notes: list[tuple[str, str]], docs_dir: Path) -> list[str]:
+    """When this file is already in the corpus cut into documents another way (whole, and now with --part-pages,
+    say, or parts of another size), every document it is in; otherwise [].
+
+    A candidate is a document whose manifest notes name a file of the same name, and it came from this file
+    when all of its text is inside this file's text. The file counts as cut another way only when one of
+    those documents differs from every new unit; when all of them are new units, this is the same cut, and
+    the duplicate check adds just the missing parts (after an interrupted run, say).
+    """
+    name = _cell(path.name)
+    candidates = [docid for docid, notes in file_notes if notes[len("file: ") :].startswith(name) or f"/{name}" in notes]
+    if not candidates:
+        return []
+    digests = {u.digest for u in units}
+    full = normalized_text(dehyphenate("\n".join(u.body for u in units)))
+    inside, other_cut = [], False
+    for docid in candidates:
+        doc = docs_dir / f"{docid}.md"
+        if not doc.is_file():
+            continue
+        body = doc_body(doc)
+        text = normalized_text(body)
+        if len(text) >= MIN_ID_TEXT and text in full:
+            inside.append(docid)
+            other_cut = other_cut or normalized_hash(body) not in digests
+    return inside if other_cut else []
 
 
 def write_doc(docs_dir: Path, unit: Unit) -> None:
@@ -872,9 +956,9 @@ def write_report(path: Path, rows: dict[str, dict], notices: list[tuple[str, str
         "",
         "## Summary",
         "",
-        f"- Documents: {totals['documents']}",
+        f"- Documents: {totals['documents']} (the final check needs at least {MIN_DOCS})",
         f"- Words: {totals['words']:,}",
-        f"- Estimated tokens (words times {TOKENS_PER_WORD}): {int(totals['words'] * TOKENS_PER_WORD):,}",
+        f"- Estimated tokens (words times {TOKENS_PER_WORD}): {int(totals['words'] * TOKENS_PER_WORD):,} (`p2 check` warns above {TOKEN_WARNING:,} and fails above {TOKEN_LIMIT:,})",
         f"- Flagged documents: {totals['flagged']}",
         "",
         "## Documents",
@@ -911,12 +995,28 @@ def _say(text: str = "", end: str = "\n", flush: bool = False) -> None:
         print(text.encode(enc, "replace").decode(enc), end=end, flush=flush)
 
 
+PART_PAGES_HELP = (
+    f"split every PDF longer than N pages into parts of N pages, each its own document (try {limits.SUGGESTED_PART_PAGES} when long"
+    f" documents leave you under {limits.OWN_MIN_DOCS}); web pages and text files are not affected"
+)
+
+
+def part_pages_problem(value) -> str:
+    """Why a --part-pages value cannot be used, or "" when it can."""
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return f"--part-pages takes a whole number of pages, 1 or more, for example --part-pages {limits.SUGGESTED_PART_PAGES}"
+    return ""
+
+
 def add_arguments(parser) -> None:
     """Add the p2 ingest options to an argparse parser (cli.py may use this)."""
     parser.add_argument("src_dir", help="folder with your documents (PDF, HTML, Markdown, text)")
     parser.add_argument("--into", default="own", help="corpus to add to, under corpora/ (default: own)")
     parser.add_argument("--license", default=None, help="license id for every document in this run, for example cc-by-4.0 (default: unknown)")
     parser.add_argument("--source", default=None, help="where these documents came from, a URL or a citation (default: the file name); {name} and {stem} stand for each file's name")
+    parser.add_argument("--part-pages", type=int, default=None, metavar="N", help=PART_PAGES_HELP)
     parser.add_argument("--report", action="store_true", help="rewrite INGEST.md for the documents in docs/ now, without reading a folder")
 
 
@@ -1027,6 +1127,11 @@ def run(args) -> int:
 
     license_value = str(_arg(args, "license", default="unknown")).strip().lower() or "unknown"
     source_text = _arg(args, "source", default=None)
+    part_pages = getattr(args, "part_pages", None)
+    problem = part_pages_problem(part_pages)
+    if problem:
+        _say(problem + ".")
+        return 1
 
     try:
         from p2 import license as _license  # my own module; guarded so ingest still works alone
@@ -1060,6 +1165,7 @@ def run(args) -> int:
     docs_dir.mkdir(parents=True, exist_ok=True)
     taken = {p.stem for p in docs_dir.glob("*.md")} | read_manifest_ids(manifest)
     seen_hash = existing_hashes(docs_dir)
+    file_notes = manifest_file_notes(manifest)
 
     # Many publishers put one title on every chapter of a volume (the USGS Mineral Commodity Summaries
     # call every chapter "Mineral Commodity Summaries 2024"). A title several files share says nothing
@@ -1075,6 +1181,8 @@ def run(args) -> int:
     report_rows = _read_report_rows(report)
     notices: list[tuple[str, str, str]] = []
     added = 0
+    recut: list[str] = []  # files already in the corpus, cut into documents another way
+    long_pdfs = 0  # PDFs longer than the suggested part size, for the hint at the end
 
     _say(f"Reading {len(files)} file(s) from {src} ...")
     try:
@@ -1082,7 +1190,9 @@ def run(args) -> int:
             rel = path.relative_to(src).as_posix()
             docid = make_id(path, taken, src)
             _say(f"  {rel} ", end="", flush=True)
-            result = process_file(path, rel, docid)
+            result = process_file(path, rel, docid, part_pages)
+            if result.pages > limits.SUGGESTED_PART_PAGES:
+                long_pdfs += 1
             if result.status != "ok":
                 _say(f"-> not added: {result.message}")
                 notices.append((rel, result.status, result.message))
@@ -1097,6 +1207,15 @@ def run(args) -> int:
                 same = result.duplicates[0][1]
                 _say(f"-> already in the corpus (same text as {same}), skipped")
                 notices.append((rel, "duplicate", f"The text is the same as `{same}`, which is already in the corpus."))
+                continue
+            earlier = cut_another_way(path, result.units, file_notes, docs_dir)
+            if earlier:
+                more = f" and {len(earlier) - 1} more" if len(earlier) > 1 else ""
+                _say(f"-> not added: its text is already in the corpus as {earlier[0]}{more}, cut into documents another way")
+                named = ", ".join(f"`{d}`" for d in earlier)
+                notices.append((rel, "recut", f"Its text is already in the corpus, cut into documents another way, as {named}, so it was not added again. "
+                                              "To cut it again, remove those documents and their manifest rows first."))  # fmt: skip
+                recut.append(rel)
                 continue
             if meta.get(path) and meta[path] in shared_titles and result.title == meta[path]:
                 better = f"{name_title(path)} - {result.title}"
@@ -1144,18 +1263,28 @@ def run(args) -> int:
     est_tokens = int(total_words * TOKENS_PER_WORD)
     shown_report = report.relative_to(root).as_posix() if report.is_relative_to(root) else str(report)
     shown_manifest = manifest.relative_to(root).as_posix() if manifest.is_relative_to(root) else str(manifest)
+    shown_docs = docs_dir.relative_to(root).as_posix() if docs_dir.is_relative_to(root) else str(docs_dir)
     _say()
     _say(f"Added {added} document(s). The corpus now has {n_present} document(s), about {total_words:,} words (about {est_tokens:,} tokens).")
     if notices:
         _say(f"{len(notices)} file(s) were not added; the reasons are in {shown_report}.")
     if totals["flagged"]:
         _say(f"{totals['flagged']} document(s) have flags. Open {shown_report} and look at them before you trust the text.")
-    if n_present < 200:
-        _say(f"You need at least 200 documents in the own corpus for the final check, so {200 - n_present} more to go (long documents split into parts count as parts).")
+    if recut:
+        _say(f"{len(recut)} file(s) are already in the corpus, cut into documents another way, so they were not added again.")
+        _say(f"To cut them again, delete their documents from {shown_docs}/ and their rows from {shown_manifest} (INGEST.md names them), then run ingest again.")
+        _say("Do it before your qrels mention those documents, because a document's id must not change once a judgment names it.")
+    if n_present < MIN_DOCS:
+        _say(f"You need at least {MIN_DOCS} documents in the own corpus for the final check, so {MIN_DOCS - n_present} more to go (long documents split into parts count as parts).")
+        if not part_pages and long_pdfs:
+            n = limits.SUGGESTED_PART_PAGES
+            _say(f"This run read {long_pdfs} PDF(s) longer than {n} pages. If long documents are what keeps you under {MIN_DOCS}, "
+                 f"--part-pages {n} splits each one into parts of {n} pages that each count as a document; the README's size rules show the arithmetic.")  # fmt: skip
     if est_tokens > TOKEN_LIMIT:
-        _say(f"That is above the limit of {TOKEN_LIMIT:,} tokens, so `p2 check` will fail: CI could not encode the corpus in time. Remove documents, or keep only the parts your queries need.")
+        _say(f"That is above the limit of {TOKEN_LIMIT:,} tokens, so `p2 check` will fail, because CI could not encode the corpus within its {limits.CI_MINUTES} minutes. "
+             "Remove documents, or keep only the parts your queries need.")  # fmt: skip
     elif est_tokens > TOKEN_WARNING:
-        _say(f"Heads up: that is above about {TOKEN_WARNING:,} tokens, near the limit of {TOKEN_LIMIT:,}, and a cold run on the CI machine will be slow.")
+        _say(f"Heads up: that is above {TOKEN_WARNING:,} tokens, near the limit of {TOKEN_LIMIT:,}, so the first CI run that encodes it can take up to about 15 minutes, once; later runs reuse the cache.")
     if added and license_value == "unknown":
         _say(f"The license column says unknown for these documents. Fix it in {shown_manifest}, then run: uv run p2 license")
     _say(f"Wrote {shown_report}")

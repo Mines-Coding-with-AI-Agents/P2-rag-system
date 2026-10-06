@@ -42,15 +42,15 @@ from pathlib import Path
 
 from p2 import config, paths, retrievers, score, trace, verify
 from p2 import corpus as corpus_mod
+from p2.limits import CI_MINUTES, OWN_MAX_BYTES, OWN_MAX_FILE_BYTES, OWN_MIN_DOCS, OWN_TOKEN_LIMIT, OWN_TOKEN_WARNING, SUGGESTED_PART_PAGES, TOKENS_PER_WORD
 from p2.runfile import read_qrels, read_queries, read_questions, read_run, run_tag, summarize, validate_run
 
 SCORE_TOLERANCE = 1e-3
-OWN_MIN_DOCS = 200
-OWN_MAX_BYTES = 25 * 1024 * 1024
-OWN_MAX_FILE_BYTES = 10 * 1024 * 1024
-OWN_TOKEN_WARNING = 500_000
-OWN_TOKEN_LIMIT = 600_000  # "at most about 500,000 tokens", so a cold CI run stays well inside its time limit
-TOKENS_PER_WORD = 1.4
+# The own corpus's size rules live in p2/limits.py, which also says why they are what they are.
+OWN_SIZE_ITEM = (
+    f"own corpus size (at most {OWN_MAX_BYTES // 2**20} MB, {OWN_MAX_FILE_BYTES // 2**20} MB per file"
+    f" and {OWN_TOKEN_LIMIT:,} estimated tokens)"
+)
 GOLD_MIN_QUERIES = 30
 GOLD_MIN_HAND = 10
 REPEATS = 3
@@ -220,22 +220,23 @@ def check_own_size(ctx: Context, r: Report) -> None:
     files = [p for p in base.rglob("*") if p.is_file()]
     total = sum(p.stat().st_size for p in files)
     big = [p for p in files if p.stat().st_size > OWN_MAX_FILE_BYTES]
-    what = "own corpus size (at most 25 MB, 10 MB per file and about 500,000 tokens)"
+    what = OWN_SIZE_ITEM
     if big:
         r.fail(what, f"{rel(ctx, big[0])} is {big[0].stat().st_size / 1e6:.1f} MB", "Split it into parts or drop it, then commit.")
         return
     if total > OWN_MAX_BYTES:
-        r.fail(what, f"corpora/own/ holds {total / 1e6:.1f} MB", "Remove documents until it is under 25 MB, then commit.")
+        r.fail(what, f"corpora/own/ holds {total / 1e6:.1f} MB", f"Remove documents until it is under {OWN_MAX_BYTES // 2**20} MB, then commit.")
         return
     words = sum(len(d.text.split()) for d in ctx.corpus("own").docs.values())
     tokens = int(words * TOKENS_PER_WORD)
     note = f"{total / 1e6:.1f} MB, about {tokens:,} tokens"
     if tokens > OWN_TOKEN_LIMIT:
-        r.fail(what, f"the corpus is about {tokens:,} tokens (words times {TOKENS_PER_WORD}), above the limit of {OWN_TOKEN_LIMIT:,}, so CI cannot encode it in time",
+        r.fail(what, f"the corpus is about {tokens:,} tokens (words times {TOKENS_PER_WORD}), above the limit of {OWN_TOKEN_LIMIT:,}, so CI could not encode it within its {CI_MINUTES} minutes",
                "Remove documents (or cut long ones to the parts your queries need) until `uv run p2 check` says it is under the limit, then commit.")  # fmt: skip
         return
     if tokens > OWN_TOKEN_WARNING:
-        note += f"; that is near the limit of {OWN_TOKEN_LIMIT:,}, and a cold CI run takes several minutes"
+        note += (f"; that is above {OWN_TOKEN_WARNING:,} and near the limit of {OWN_TOKEN_LIMIT:,}, so the first CI run that encodes it"
+                 " can take up to about 15 minutes, once, and later runs reuse the cache")  # fmt: skip
     r.ok(what, note)
 
 
@@ -656,10 +657,13 @@ def check_complete_runs(ctx: Context, r: Report) -> None:
 
 def check_complete_own(ctx: Context, r: Report) -> None:
     n = len(ctx.doc_ids("own"))
+    what = f"own corpus has at least {OWN_MIN_DOCS} documents"
     if n >= OWN_MIN_DOCS:
-        r.ok("own corpus has at least 200 documents", f"{n:,}")
+        r.ok(what, f"{n:,}")
+    elif n:
+        r.todo(what, f"it has {n}; when long PDFs keep you under {OWN_MIN_DOCS}, `p2 ingest --part-pages {SUGGESTED_PART_PAGES}` splits them into parts that each count (README, size rules)")
     else:
-        r.todo("own corpus has at least 200 documents", f"it has {n}")
+        r.todo(what, f"it has {n}")
     queries = ctx.queries("own", "own")
     rels = {q for q, judged in ctx.qrels("own", "own").items() if any(v > 0 for v in judged.values())}
     hand = sum(1 for q in queries if q.origin == "hand")

@@ -233,7 +233,10 @@ If your field's documents are copyrighted, pick an openly licensed slice of the 
 - Publisher PDFs, textbooks, and engineering standards (ASTM, ISO, IEEE).
 - Other courses' materials, and employer or internship documents.
 - An advisor's unpublished data, unless you have their written permission.
-- Anything with other people's personal data, and anything export-controlled.
+- Private information about people: student records, patient data, survey or interview answers, home addresses or personal phone numbers, private messages, and data about the members of your lab.
+  Those people never agreed to be in a public repo, and git history keeps whatever you commit.
+  Names and work contact details that the publisher printed in a public document are fine, such as an author's email on a paper or the "Prepared by" line on a USGS chapter.
+- Anything export-controlled.
 - Anything licensed NC (non-commercial) or ND (no derivatives), because whether chunks and embeddings count as adaptations has no settled answer.
 - Anything with no license at all: a missing copyright notice does not make a work free.
 
@@ -259,9 +262,23 @@ Size rules, checked by `p2 check`:
 
 - At least **200 documents** from one domain.
   Below that, every system finds nearly everything and the comparison measures nothing.
-  Long documents split into parts of about 10 pages, and each part counts as a document.
-- At most **25 MB** under `corpora/own/` and 10 MB per file, and at most about **500,000 tokens** (words times 1.4), because CI encodes the whole corpus cold and has 30 minutes to do it: `p2 check` warns above 500,000 and fails above 600,000.
-- Between 500 and 1,500 documents is a good size, as long as the corpus stays under the token limit, which for long documents means fewer of them; past about 1,500 you add CI time and not information.
+  A long document can be split into parts, and each part counts as a document (step 1 below).
+- At most **1,000,000 tokens**, estimated as words times 1.4: `p2 check` warns above 800,000 and fails above 1,000,000.
+- At most **25 MB** under `corpora/own/`, and 10 MB per file.
+- Between 500 and 1,500 documents is a good size when your documents are short, as long as the corpus stays under the token limit; past about 1,500 you add CI time and not information.
+
+The token limit is there for CI.
+The first CI run that checks a `dense` run on your corpus encodes the whole corpus, and the check may run for 45 minutes.
+The shared corpus, about 550,000 tokens, took 3 to 7 minutes to encode on GitHub's Linux machine in my tests, so a corpus near the limit costs about twice that, 6 to 14 minutes, once.
+Later runs reuse a cache, and the same check then took 6 seconds.
+I set the limit this high because most of you bring a corpus from your own field, where long documents are common, and the extra CI time is paid once, and only by those of you with a large corpus.
+
+The two rules meet when your documents are long: 200 documents of about 3,500 words is about 700,000 words, or about 1,000,000 tokens.
+So 200 whole documents much longer than that cannot fit under the limit.
+If long documents leave you under 200, split them into parts of about 5 pages with `--part-pages 5` (step 1 below), and each part counts as a document.
+For example, 70 papers of about 9,000 words and 15 pages each are only 70 documents whole, and 210 documents as 5-page parts, about 880,000 tokens in all.
+In my tests a 5-page part was about 1,700 words of a NIST report and about 3,300 words of a two-column research paper, so 200 such parts stay under the limit.
+`corpora/own/INGEST.md` lists the words in each part, so check yours, and if your parts run well over 3,500 words, use fewer pages, such as `--part-pages 3`.
 
 ### Steps
 
@@ -272,7 +289,11 @@ Size rules, checked by `p2 check`:
    Word and PowerPoint files are refused, and the message tells you to export them to PDF first.
    Ingest runs a cleaning pass that strips markup, repairs ligatures and soft hyphens, re-joins words hyphenated across lines, drops page headers and footers, and drops a trailing reference list.
    This matters because raw converter output breaks the quote check on 8% to 41% of sentences in my tests, and cleaned text breaks it on 1% or less.
-   Documents over about 15,000 words are split into parts with the page range in the id, and exact duplicates are skipped.
+   Documents over about 15,000 words are split into parts of about 10 pages, with the page range in the id (`handbook__p011-020`), and exact duplicates are skipped.
+   If long documents leave you under 200 (see the size rules above), add `--part-pages 5`: every PDF longer than 5 pages becomes parts of 5 pages with the same kind of id, and each part counts as a document.
+   It splits PDFs only, because web pages and text files have no pages; those are split only above 15,000 words.
+   Decide before you write any judgments, and use the same setting for every batch of PDFs, so your documents are of a similar size.
+   If you already ingested a file cut another way, whole for example, ingest skips it and names the documents its text is already in; remove those documents and their rows in `corpora/own/manifest.tsv` first (Claude Code can do it), then run ingest again.
    If your documents have different licenses, run ingest once per license so each batch gets its own `--license` and `--source`, or edit the manifest rows by hand.
    Document ids come from file names and never change once your judgments mention them.
    Titles come from the PDF's metadata, the first heading or the first line; when several PDFs share one metadata title, as every chapter of a volume often does, each title starts with its file name instead.
@@ -451,7 +472,7 @@ If Canvas and this file ever disagree, Canvas wins, and please tell me so I can 
 - **Using Claude Code is the point**, not something to disclose or apologize for.
   This is a course about driving agents well.
 - **Your repo is public, and so is its history.**
-  Do not commit API keys, passwords, personal information, or other people's private documents.
+  Do not commit API keys, passwords, private information about people (the corpus rules above say what that covers), or other people's private documents.
   A secret you delete in a later commit is still readable.
   You never need an API key in this project, because `claude -p` uses your Claude Code sign-in.
 - **Commit only text you may publish**, with its license recorded.

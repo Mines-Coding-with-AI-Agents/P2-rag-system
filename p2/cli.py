@@ -20,6 +20,7 @@ from pathlib import Path
 from p2 import config, metrics, paths, retrievers
 from p2 import corpus as corpus_mod
 from p2.claude import CONFIRM_ABOVE, confirm_calls
+from p2.limits import OWN_MIN_DOCS, SUGGESTED_PART_PAGES
 from p2.runfile import read_qrels, read_queries, run_tag, write_run
 from p2.trace import Tracer
 
@@ -65,6 +66,7 @@ def parser() -> argparse.ArgumentParser:
     ing.add_argument("--into", default="own", choices=["own"], help="the corpus to add to (own)")
     ing.add_argument("--license", help="the license of these documents, from the vocabulary in the README")
     ing.add_argument("--source", help="where they came from (a URL or a citation); {name} and {stem} stand for each file's name, as in https://example.org/reports/{name}")
+    ing.add_argument("--part-pages", type=int, metavar="N", help=f"split every PDF longer than N pages into parts of N pages, each its own document (try {SUGGESTED_PART_PAGES} when long documents leave you under {OWN_MIN_DOCS}); web pages and text files are not affected")
     ing.add_argument("--report", action="store_true", help="rewrite corpora/own/INGEST.md for the documents there now (after you removed some), without reading a folder")
 
     lic = sub.add_parser("license", help="check the licenses of your own corpus and write LICENSES.md")

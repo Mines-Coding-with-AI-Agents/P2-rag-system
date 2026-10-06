@@ -54,4 +54,9 @@ A new dependency goes in through `uv add`, and `uv.lock` is committed with it, b
   `p2` stops by itself before more than 5 calls and prints the number; add `--yes` only after the student has said yes to that number.
 - A corpus document needs a license from the `p2 license` vocabulary.
   Walk a failing or flagged document through the license-check skill (read `.claude/skills/license-check/SKILL.md` in this repo and follow it), and write `reviewed: <reason with the quote>` in `notes` only after quoting the license text from the source page.
-- Keep keys, tokens and private files out of the repo; it is public, and so is its history.
+- The own corpus needs at least 200 documents and at most 1,000,000 estimated tokens (words times 1.4; `p2 check` warns above 800,000), because CI encodes it within a 45-minute job.
+  When long PDFs leave it under 200, `uv run p2 ingest SRC_DIR --part-pages 5` splits every PDF longer than 5 pages into 5-page parts that each count as a document.
+  Do it before any judgment names those documents; ingest skips a file already in the corpus cut another way and names its documents, which must be removed (files and manifest rows) before the file is cut again.
+- Keep keys, tokens, private files and private information about people out of the repo: student records, patient data, survey or interview answers, home addresses or personal phone numbers, private messages, lab members' data.
+  It is public, and so is its history.
+  Names and work contact details that a publisher printed in a public document may stay, such as an author's email on a paper or the "Prepared by" line on a USGS chapter.
