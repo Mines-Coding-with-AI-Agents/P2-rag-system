@@ -505,7 +505,7 @@ Here you put that agent beside your four systems on your own corpus.
 This is the most expensive option.
 In lab 12 the agent read about 54,000 input tokens per query inside the course repo, on 260 short articles, and the course's `CLAUDE.md` files, which Claude Code reads in the folder it runs in and in every folder above it, were 9,000 to 16,000 of those.
 `p2` runs the agent on a fresh copy of your documents outside your repo, so it loads no `CLAUDE.md` and cannot open your gold set, which keeps the comparison honest and every call a little cheaper.
-On a corpus of 271 USGS chapters it read about 40,000 per query in my test, outside the course repo, and my research measured 120,000 to 245,000 per question on a corpus of 5,183 abstracts.
+On a corpus of 271 USGS chapters, run the way `p2` runs it now (a fresh copy of the documents, each tool fenced to that copy), it read about 22,500 to 27,700 input tokens per query in my tests, and my research measured 120,000 to 245,000 per question on a corpus of 5,183 abstracts.
 So 10 queries on your corpus can be half a million to two and a half million input tokens, more than a full reranker pass over all your own queries.
 Try 2 queries first, look at the input tokens per query that `p2 run` prints, and spread the rest over more than one day if you need to.
 
